@@ -1,8 +1,6 @@
 import ccxt
 import pandas as pd
-import numpy as np
 import requests
-import json
 import os
 from datetime import datetime
 
@@ -10,29 +8,50 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID        = os.environ["CHAT_ID"]
 ZIGZAG_LEN     = 9
 FIB_FACTOR     = 0.33
-TOP_N          = 100
+CANDLE_COUNT   = 300
 TIMEFRAMES     = {
     "15m": "15 dakika",
     "1h":  "1 saat",
     "4h":  "4 saat",
 }
-CANDLE_COUNT   = 300
+
+# OKX perpetual parite listesi
+PAIRS = [
+    "BTC/USDT:USDT","ETH/USDT:USDT","SOL/USDT:USDT","OKB/USDT:USDT","XRP/USDT:USDT",
+    "ADA/USDT:USDT","DOGE/USDT:USDT","SHIB/USDT:USDT","AVAX/USDT:USDT","LINK/USDT:USDT",
+    "DOT/USDT:USDT","TRX/USDT:USDT","LTC/USDT:USDT","BCH/USDT:USDT","NEAR/USDT:USDT",
+    "APT/USDT:USDT","SUI/USDT:USDT","ARB/USDT:USDT","OP/USDT:USDT","MATIC/USDT:USDT",
+    "STX/USDT:USDT","TIA/USDT:USDT","SEI/USDT:USDT","INJ/USDT:USDT","FTM/USDT:USDT",
+    "ATOM/USDT:USDT","ALGO/USDT:USDT","EGLD/USDT:USDT","IMX/USDT:USDT","FIL/USDT:USDT",
+    "GRT/USDT:USDT","ICP/USDT:USDT","AXS/USDT:USDT","SAND/USDT:USDT","MANA/USDT:USDT",
+    "THETA/USDT:USDT","FLOW/USDT:USDT","KAVA/USDT:USDT","ONE/USDT:USDT","CHZ/USDT:USDT",
+    "MINA/USDT:USDT","CRV/USDT:USDT","AAVE/USDT:USDT","FET/USDT:USDT","RENDER/USDT:USDT",
+    "WLD/USDT:USDT","AGIX/USDT:USDT","ARKM/USDT:USDT","LDO/USDT:USDT","MKR/USDT:USDT",
+    "COMP/USDT:USDT","SNX/USDT:USDT","UNI/USDT:USDT","SUSHI/USDT:USDT","YFI/USDT:USDT",
+    "1INCH/USDT:USDT","WOO/USDT:USDT","GMX/USDT:USDT","DYDX/USDT:USDT","ENS/USDT:USDT",
+    "ANKR/USDT:USDT","OCEAN/USDT:USDT","GALA/USDT:USDT","ENJ/USDT:USDT","BLUR/USDT:USDT",
+    "MASK/USDT:USDT","CYBER/USDT:USDT","STRK/USDT:USDT","PYTH/USDT:USDT","CELO/USDT:USDT",
+    "LRC/USDT:USDT","QTUM/USDT:USDT","PEPE/USDT:USDT","FLOKI/USDT:USDT","WIF/USDT:USDT",
+    "BONK/USDT:USDT","MEME/USDT:USDT","WAVES/USDT:USDT","ZIL/USDT:USDT","XMR/USDT:USDT",
+    "ZEC/USDT:USDT","DASH/USDT:USDT","IOST/USDT:USDT","ONT/USDT:USDT","RVN/USDT:USDT",
+    "NEO/USDT:USDT","HOT/USDT:USDT","XLM/USDT:USDT","DY/USDT:USDT","BNB/USDT:USDT",
+]
+
 
 def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"})
+    try:
+        requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=10)
+    except Exception as e:
+        print(f"Telegram hata: {e}")
 
-def get_top_pairs(exchange, n=100):
-    tickers = exchange.fetch_tickers()
-    swaps = {k: v for k, v in tickers.items() if k.endswith("/USDT:USDT") and v.get("quoteVolume")}
-    sorted_pairs = sorted(swaps, key=lambda x: swaps[x]["quoteVolume"] or 0, reverse=True)
-    return sorted_pairs[:n]
 
 def fetch_ohlcv(exchange, symbol, timeframe, limit=300):
     data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
     df = pd.DataFrame(data, columns=["ts", "open", "high", "low", "close", "volume"])
     df["ts"] = pd.to_datetime(df["ts"], unit="ms")
     return df
+
 
 def compute_zigzag(df, length=9):
     high_pts, low_pts = [], []
@@ -58,6 +77,7 @@ def compute_zigzag(df, length=9):
                 high_pts.append((high_idx, high_val))
     return high_pts, low_pts
 
+
 def detect_msb(high_pts, low_pts, fib=0.33):
     signals = []
     market = 1
@@ -74,7 +94,8 @@ def detect_msb(high_pts, low_pts, fib=0.33):
         elif market == -1 and h0 > h1 and h0 > h1 + abs(h1 - l0) * fib:
             new_market = 1
         if new_market != market:
-            signals.append({"direction": new_market, "h0": h0, "h0i": h0i, "h1": h1, "h1i": h1i, "l0": l0, "l0i": l0i, "l1": l1, "l1i": l1i})
+            signals.append({"direction": new_market, "h0": h0, "h0i": h0i, "h1": h1, "h1i": h1i,
+                             "l0": l0, "l0i": l0i, "l1": l1, "l1i": l1i})
             market = new_market
         if market == 1:
             l_idx += 1
@@ -82,49 +103,48 @@ def detect_msb(high_pts, low_pts, fib=0.33):
             h_idx += 1
     return signals
 
+
 def find_ob_bb(df, sig, zigzag_len=9):
     direction = sig["direction"]
-    if direction == 1:
-        try:
+    try:
+        if direction == 1:
             h1i_pos = df.index.get_loc(sig["h1i"])
             l0i_pos = df.index.get_loc(sig["l0i"])
             l1i_pos = df.index.get_loc(sig["l1i"])
-        except KeyError:
-            return None
-        ob_idx = None
-        for i in range(h1i_pos, min(l0i_pos + zigzag_len, len(df))):
-            if df["open"].iloc[i] > df["close"].iloc[i]:
-                ob_idx = i
-        bb_idx = None
-        for i in range(max(0, l1i_pos - zigzag_len), h1i_pos + 1):
-            if df["open"].iloc[i] < df["close"].iloc[i]:
-                bb_idx = i
-    else:
-        try:
+            ob_idx = None
+            for i in range(h1i_pos, min(l0i_pos + zigzag_len, len(df))):
+                if df["open"].iloc[i] > df["close"].iloc[i]:
+                    ob_idx = i
+            bb_idx = None
+            for i in range(max(0, l1i_pos - zigzag_len), h1i_pos + 1):
+                if df["open"].iloc[i] < df["close"].iloc[i]:
+                    bb_idx = i
+        else:
             l1i_pos = df.index.get_loc(sig["l1i"])
             h0i_pos = df.index.get_loc(sig["h0i"])
             h1i_pos = df.index.get_loc(sig["h1i"])
-        except KeyError:
-            return None
-        ob_idx = None
-        for i in range(l1i_pos, min(h0i_pos + zigzag_len, len(df))):
-            if df["open"].iloc[i] < df["close"].iloc[i]:
-                ob_idx = i
-        bb_idx = None
-        for i in range(max(0, h1i_pos - zigzag_len), l1i_pos + 1):
-            if df["open"].iloc[i] > df["close"].iloc[i]:
-                bb_idx = i
+            ob_idx = None
+            for i in range(l1i_pos, min(h0i_pos + zigzag_len, len(df))):
+                if df["open"].iloc[i] < df["close"].iloc[i]:
+                    ob_idx = i
+            bb_idx = None
+            for i in range(max(0, h1i_pos - zigzag_len), l1i_pos + 1):
+                if df["open"].iloc[i] > df["close"].iloc[i]:
+                    bb_idx = i
+    except KeyError:
+        return None
+
     if ob_idx is None or bb_idx is None:
         return None
-    ob_top    = df["high"].iloc[ob_idx]
-    ob_bottom = df["low"].iloc[ob_idx]
-    bb_top    = df["high"].iloc[bb_idx]
-    bb_bottom = df["low"].iloc[bb_idx]
-    inter_top    = min(ob_top, bb_top)
-    inter_bottom = max(ob_bottom, bb_bottom)
+
+    inter_top    = min(df["high"].iloc[ob_idx], df["high"].iloc[bb_idx])
+    inter_bottom = max(df["low"].iloc[ob_idx],  df["low"].iloc[bb_idx])
+
     if inter_top <= inter_bottom:
         return None
+
     return inter_top, inter_bottom
+
 
 def scan_pair(exchange, symbol, timeframe, tf_label):
     try:
@@ -139,12 +159,7 @@ def scan_pair(exchange, symbol, timeframe, tf_label):
             return None
         last_sig = signals[-1]
         last_bar_time = df["ts"].iloc[-1]
-        if last_sig["direction"] == 1:
-            sig_time = df.loc[last_sig["l0i"], "ts"] if last_sig["l0i"] in df.index else None
-        else:
-            sig_time = df.loc[last_sig["h0i"], "ts"] if last_sig["h0i"] in df.index else None
-        if sig_time is None:
-            return None
+        sig_time = df.loc[last_sig["l0i"], "ts"] if last_sig["direction"] == 1 else df.loc[last_sig["h0i"], "ts"]
         time_diff = (last_bar_time - sig_time).total_seconds()
         tf_seconds = {"15m": 900, "1h": 3600, "4h": 14400}
         if time_diff > tf_seconds[timeframe] * 10:
@@ -153,7 +168,7 @@ def scan_pair(exchange, symbol, timeframe, tf_label):
         if result is None:
             return None
         inter_top, inter_bottom = result
-        pair_name = symbol.replace("/USDT:USDT", "USDT")
+        pair_name = symbol.replace("/USDT:USDT", "USDT.P")
         now = datetime.utcnow().strftime("%H:%M UTC")
         msg = (
             f"<b>{'🟢 BULLISH' if last_sig['direction']==1 else '🔴 BEARISH'} MSB Kesişimi!</b>\n"
@@ -163,23 +178,35 @@ def scan_pair(exchange, symbol, timeframe, tf_label):
             f"🕐 Saat: {now}"
         )
         return msg
-    except Exception:
+    except Exception as e:
+        print(f"  Hata {symbol}: {e}")
         return None
+
 
 def main():
     exchange = ccxt.okx({"options": {"defaultType": "swap"}})
-    print("Pariteler çekiliyor...")
+
+    # Geçersiz pariteleri filtrele
+    print("Pariteler kontrol ediliyor...")
+    valid_pairs = []
     try:
-        pairs = get_top_pairs(exchange, TOP_N)
+        markets = exchange.load_markets()
+        for p in PAIRS:
+            if p in markets:
+                valid_pairs.append(p)
+            else:
+                print(f"  Atlandı: {p}")
     except Exception as e:
-        send_telegram(f"⚠️ OKX bağlantı hatası: {e}")
-        return
-    print(f"{len(pairs)} parite bulundu.")
+        print(f"Market yükleme hatası: {e}")
+        valid_pairs = PAIRS  # hata olursa listeyi direkt kullan
+
+    print(f"{len(valid_pairs)} geçerli parite bulundu.")
     total_signals = 0
+
     for tf, tf_label in TIMEFRAMES.items():
         print(f"\n── {tf_label} taranıyor ──")
         tf_signals = 0
-        for symbol in pairs:
+        for symbol in valid_pairs:
             msg = scan_pair(exchange, symbol, tf, tf_label)
             if msg:
                 print(f"  ✅ Sinyal: {symbol}")
@@ -187,10 +214,12 @@ def main():
                 tf_signals += 1
                 total_signals += 1
         print(f"  {tf_label}: {tf_signals} sinyal.")
+
     if total_signals == 0:
         print("Hiç sinyal bulunamadı.")
     else:
         print(f"\nToplam {total_signals} sinyal gönderildi.")
+
 
 if __name__ == "__main__":
     main()
