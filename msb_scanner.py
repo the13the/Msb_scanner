@@ -1,5 +1,6 @@
 import ccxt
 import pandas as pd
+import numpy as np
 import requests
 import os
 import json
@@ -10,7 +11,7 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID        = os.environ["CHAT_ID"]
 ZIGZAG_LEN     = 9
 FIB_FACTOR     = 0.33
-CANDLE_COUNT   = 300
+CANDLE_COUNT   = 500
 SENT_FILE      = "sent_signals.json"
 TIMEFRAMES     = {
     "15m": "15 dakika",
@@ -59,8 +60,7 @@ PAIRS = [
 
 
 def make_signal_id(symbol, timeframe, direction, inter_top, inter_bottom):
-    """Sinyal için benzersiz ID oluştur."""
-    key = f"{symbol}_{timeframe}_{direction}_{inter_top:.4f}_{inter_bottom:.4f}"
+    key = f"{symbol}_{timeframe}_{direction}_{inter_top:.6f}_{inter_bottom:.6f}"
     return hashlib.md5(key.encode()).hexdigest()
 
 
@@ -84,138 +84,211 @@ def send_telegram(msg):
         print(f"Telegram hata: {e}")
 
 
-def fetch_ohlcv(exchange, symbol, timeframe, limit=300):
+def fetch_ohlcv(exchange, symbol, timeframe, limit=500):
     data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
     df = pd.DataFrame(data, columns=["ts", "open", "high", "low", "close", "volume"])
-    df["ts"] = pd.to_datetime(df["ts"], unit="ms")
+    df = df.reset_index(drop=True)
     return df
 
 
-def compute_zigzag(df, length=9):
-    high_pts, low_pts = [], []
-    trend = 1
-    for i in range(length, len(df)):
-        window_h = df["high"].iloc[i - length: i + 1].max()
-        window_l = df["low"].iloc[i - length: i + 1].min()
-        to_up   = df["high"].iloc[i] >= window_h
-        to_down = df["low"].iloc[i]  <= window_l
-        prev_trend = trend
-        if trend == 1 and to_down:
-            trend = -1
-        elif trend == -1 and to_up:
-            trend = 1
-        if trend != prev_trend:
-            if trend == 1:
-                low_val = df["low"].iloc[max(0, i - length): i + 1].min()
-                low_idx = df["low"].iloc[max(0, i - length): i + 1].idxmin()
-                low_pts.append((low_idx, low_val))
+def pine_msb_scan(df, zigzag_len=9, fib_factor=0.33):
+    """
+    Pine Script mantığını birebir taklit eder.
+    Her bar için trend, market, zigzag hesaplar.
+    Döner: son market değişiminde oluşan kesişim kutusu (varsa)
+    """
+    n = len(df)
+    high  = df["high"].values
+    low   = df["low"].values
+    open_ = df["open"].values
+    close = df["close"].values
+
+    # --- ZigZag ---
+    # Pine: to_up = high >= ta.highest(zigzag_len)
+    #        to_down = low <= ta.lowest(zigzag_len)
+    trend = np.ones(n, dtype=int)
+    to_up   = np.zeros(n, dtype=bool)
+    to_down = np.zeros(n, dtype=bool)
+
+    for i in range(zigzag_len, n):
+        highest = np.max(high[max(0, i - zigzag_len + 1): i + 1])
+        lowest  = np.min(low[max(0,  i - zigzag_len + 1): i + 1])
+        to_up[i]   = high[i] >= highest
+        to_down[i] = low[i]  <= lowest
+
+    for i in range(1, n):
+        trend[i] = trend[i-1]
+        if trend[i] == 1 and to_down[i]:
+            trend[i] = -1
+        elif trend[i] == -1 and to_up[i]:
+            trend[i] = 1
+
+    # --- High/Low points (zigzag tepe/dip noktaları) ---
+    high_points = []  # (bar_index, value)
+    low_points  = []
+
+    for i in range(1, n):
+        if trend[i] != trend[i-1]:
+            if trend[i] == 1:
+                # trend aşağıdan yukarıya döndü → dip noktası ekle
+                since = 0
+                for j in range(i, -1, -1):
+                    if j == 0 or (trend[j] != trend[i] and j < i):
+                        since = j
+                        break
+                window = low[since:i+1]
+                min_idx = since + np.argmin(window)
+                low_points.append((min_idx, low[min_idx]))
             else:
-                high_val = df["high"].iloc[max(0, i - length): i + 1].max()
-                high_idx = df["high"].iloc[max(0, i - length): i + 1].idxmax()
-                high_pts.append((high_idx, high_val))
-    return high_pts, low_pts
+                # trend yukarıdan aşağıya döndü → tepe noktası ekle
+                since = 0
+                for j in range(i, -1, -1):
+                    if j == 0 or (trend[j] != trend[i] and j < i):
+                        since = j
+                        break
+                window = high[since:i+1]
+                max_idx = since + np.argmax(window)
+                high_points.append((max_idx, high[max_idx]))
 
+    if len(high_points) < 2 or len(low_points) < 2:
+        return None
 
-def detect_msb(high_pts, low_pts, fib=0.33):
-    signals = []
+    # --- Market Structure ---
+    # Pine: market == 1 and l0 < l1 and l0 < l1 - abs(h0-l1)*fib → bearish MSB
+    #        market == -1 and h0 > h1 and h0 > h1 + abs(h1-l0)*fib → bullish MSB
+
+    market_changes = []  # (bar_index, direction, h0,h0i,h1,h1i,l0,l0i,l1,l1i)
     market = 1
-    h_idx = 0
-    l_idx = 0
-    while h_idx + 1 < len(high_pts) and l_idx + 1 < len(low_pts):
-        h0i, h0 = high_pts[h_idx]
-        h1i, h1 = high_pts[h_idx + 1] if h_idx + 1 < len(high_pts) else (h0i, h0)
-        l0i, l0 = low_pts[l_idx]
-        l1i, l1 = low_pts[l_idx + 1] if l_idx + 1 < len(low_pts) else (l0i, l0)
+    hi = 0
+    li = 0
+
+    while hi + 1 < len(high_points) and li + 1 < len(low_points):
+        h0i, h0 = high_points[hi]
+        h1i, h1 = high_points[hi+1]
+        l0i, l0 = low_points[li]
+        l1i, l1 = low_points[li+1]
+
         new_market = market
-        if market == 1 and l0 < l1 and l0 < l1 - abs(h0 - l1) * fib:
+        if market == 1 and l0 < l1 and l0 < l1 - abs(h0 - l1) * fib_factor:
             new_market = -1
-        elif market == -1 and h0 > h1 and h0 > h1 + abs(h1 - l0) * fib:
+        elif market == -1 and h0 > h1 and h0 > h1 + abs(h1 - l0) * fib_factor:
             new_market = 1
+
         if new_market != market:
-            signals.append({"direction": new_market, "h0": h0, "h0i": h0i, "h1": h1, "h1i": h1i,
-                             "l0": l0, "l0i": l0i, "l1": l1, "l1i": l1i})
+            market_changes.append({
+                "direction": new_market,
+                "h0": h0, "h0i": h0i,
+                "h1": h1, "h1i": h1i,
+                "l0": l0, "l0i": l0i,
+                "l1": l1, "l1i": l1i,
+            })
             market = new_market
+
         if market == 1:
-            l_idx += 1
+            li += 1
         else:
-            h_idx += 1
-    return signals
+            hi += 1
 
-
-def find_ob_bb(df, sig, zigzag_len=9):
-    direction = sig["direction"]
-    try:
-        if direction == 1:
-            h1i_pos = df.index.get_loc(sig["h1i"])
-            l0i_pos = df.index.get_loc(sig["l0i"])
-            l1i_pos = df.index.get_loc(sig["l1i"])
-            ob_idx = None
-            for i in range(h1i_pos, min(l0i_pos + zigzag_len, len(df))):
-                if df["open"].iloc[i] > df["close"].iloc[i]:
-                    ob_idx = i
-            bb_idx = None
-            for i in range(max(0, l1i_pos - zigzag_len), h1i_pos + 1):
-                if df["open"].iloc[i] < df["close"].iloc[i]:
-                    bb_idx = i
-        else:
-            l1i_pos = df.index.get_loc(sig["l1i"])
-            h0i_pos = df.index.get_loc(sig["h0i"])
-            h1i_pos = df.index.get_loc(sig["h1i"])
-            ob_idx = None
-            for i in range(l1i_pos, min(h0i_pos + zigzag_len, len(df))):
-                if df["open"].iloc[i] < df["close"].iloc[i]:
-                    ob_idx = i
-            bb_idx = None
-            for i in range(max(0, h1i_pos - zigzag_len), l1i_pos + 1):
-                if df["open"].iloc[i] > df["close"].iloc[i]:
-                    bb_idx = i
-    except KeyError:
+    if not market_changes:
         return None
 
-    if ob_idx is None or bb_idx is None:
-        return None
+    last = market_changes[-1]
+    direction = last["direction"]
 
-    inter_top    = min(df["high"].iloc[ob_idx], df["high"].iloc[bb_idx])
-    inter_bottom = max(df["low"].iloc[ob_idx],  df["low"].iloc[bb_idx])
+    # --- OB ve BB/MB bul (Pine Script mantığı) ---
+    if direction == 1:  # Bullish MSB
+        # Bu-OB: h1i → l0i+zigzag_len arasındaki son bearish mum
+        bu_ob_idx = None
+        for i in range(last["h1i"], min(last["l0i"] + zigzag_len, n)):
+            if open_[i] > close[i]:
+                bu_ob_idx = i
+
+        # Bu-BB: l1i-zigzag_len → h1i arasındaki son bullish mum
+        bu_bb_idx = None
+        for i in range(max(0, last["l1i"] - zigzag_len), last["h1i"] + 1):
+            if open_[i] < close[i]:
+                bu_bb_idx = i
+
+        if bu_ob_idx is None or bu_bb_idx is None:
+            return None
+
+        ob_top    = high[bu_ob_idx]
+        ob_bottom = low[bu_ob_idx]
+        bb_top    = high[bu_bb_idx]
+        bb_bottom = low[bu_bb_idx]
+        bb_type   = "BB" if last["l0"] < last["l1"] else "MB"
+
+    else:  # Bearish MSB
+        # Be-OB: l1i → h0i+zigzag_len arasındaki son bullish mum
+        be_ob_idx = None
+        for i in range(last["l1i"], min(last["h0i"] + zigzag_len, n)):
+            if open_[i] < close[i]:
+                be_ob_idx = i
+
+        # Be-BB: h1i-zigzag_len → l1i arasındaki son bearish mum
+        be_bb_idx = None
+        for i in range(max(0, last["h1i"] - zigzag_len), last["l1i"] + 1):
+            if open_[i] > close[i]:
+                be_bb_idx = i
+
+        if be_ob_idx is None or be_bb_idx is None:
+            return None
+
+        ob_top    = high[be_ob_idx]
+        ob_bottom = low[be_ob_idx]
+        bb_top    = high[be_bb_idx]
+        bb_bottom = low[be_bb_idx]
+        bb_type   = "BB" if last["h0"] > last["h1"] else "MB"
+
+    # Kesişim hesabı
+    inter_top    = min(ob_top, bb_top)
+    inter_bottom = max(ob_bottom, bb_bottom)
 
     if inter_top <= inter_bottom:
         return None
 
-    return inter_top, inter_bottom
+    return {
+        "direction":    direction,
+        "inter_top":    inter_top,
+        "inter_bottom": inter_bottom,
+        "bb_type":      bb_type,
+        "msb_bar":      last["h0i"] if direction == 1 else last["l0i"],
+    }
 
 
 def scan_pair(exchange, symbol, timeframe, tf_label, sent_signals):
     try:
         df = fetch_ohlcv(exchange, symbol, timeframe, limit=CANDLE_COUNT)
-        if len(df) < ZIGZAG_LEN * 3:
+        if len(df) < ZIGZAG_LEN * 5:
             return None, None
-        high_pts, low_pts = compute_zigzag(df, ZIGZAG_LEN)
-        if len(high_pts) < 2 or len(low_pts) < 2:
-            return None, None
-        signals = detect_msb(high_pts, low_pts, FIB_FACTOR)
-        if not signals:
-            return None, None
-        last_sig = signals[-1]
-        result = find_ob_bb(df, last_sig, ZIGZAG_LEN)
+
+        result = pine_msb_scan(df, ZIGZAG_LEN, FIB_FACTOR)
         if result is None:
             return None, None
-        inter_top, inter_bottom = result
 
-        # Sinyal ID oluştur, daha önce gönderildiyse atla
-        sig_id = make_signal_id(symbol, timeframe, last_sig["direction"], inter_top, inter_bottom)
+        sig_id = make_signal_id(symbol, timeframe, result["direction"],
+                                result["inter_top"], result["inter_bottom"])
         if sig_id in sent_signals:
             return None, None
 
-        pair_name = symbol.replace("/USDT:USDT", "USDT.P")
-        now = datetime.utcnow().strftime("%H:%M UTC")
+        direction  = result["direction"]
+        inter_top  = result["inter_top"]
+        inter_bottom = result["inter_bottom"]
+        bb_type    = result["bb_type"]
+        pair_name  = symbol.replace("/USDT:USDT", "USDT.P")
+        now        = datetime.utcnow().strftime("%H:%M UTC")
+        label      = f"Bu-OB-{bb_type}" if direction == 1 else f"Be-OB-{bb_type}"
+
         msg = (
-            f"<b>{'🟢 BULLISH' if last_sig['direction']==1 else '🔴 BEARISH'} MSB Kesişimi!</b>\n"
+            f"<b>{'🟢 BULLISH' if direction==1 else '🔴 BEARISH'} MSB Kesişimi!</b>\n"
             f"📊 Parite: <b>{pair_name}</b>\n"
+            f"📦 Kutu: <b>{label}</b>\n"
             f"⏱ Timeframe: <b>{tf_label}</b>\n"
             f"📍 Bölge: <b>{inter_bottom:.4f} - {inter_top:.4f}</b>\n"
             f"🕐 Saat: {now}"
         )
         return msg, sig_id
+
     except Exception as e:
         print(f"  Hata {symbol}: {e}")
         return None, None
@@ -224,7 +297,7 @@ def scan_pair(exchange, symbol, timeframe, tf_label, sent_signals):
 def main():
     exchange = ccxt.okx({"options": {"defaultType": "swap"}})
     sent_signals = load_sent_signals()
-    print(f"Daha önce gönderilen sinyal sayısı: {len(sent_signals)}")
+    print(f"Daha önce gönderilen: {len(sent_signals)} sinyal")
 
     print("Marketler yükleniyor...")
     try:
@@ -232,9 +305,9 @@ def main():
         valid_pairs = [p for p in PAIRS if p in markets]
         skipped = [p for p in PAIRS if p not in markets]
         if skipped:
-            print(f"OKX'te olmayan: {', '.join(skipped)}")
+            print(f"OKX'te olmayan ({len(skipped)}): {', '.join(skipped)}")
     except Exception as e:
-        print(f"Market yükleme hatası: {e}, liste direkt kullanılıyor.")
+        print(f"Market yükleme hatası: {e}")
         valid_pairs = PAIRS
 
     print(f"{len(valid_pairs)} parite taranacak.")
@@ -254,9 +327,7 @@ def main():
                 total_signals += 1
         print(f"  {tf_label}: {tf_signals} yeni sinyal.")
 
-    # Gönderilen sinyalleri kaydet
     sent_signals.update(new_sent)
-    # Listeyi max 10000 ile sınırla (çok büyümesin)
     if len(sent_signals) > 10000:
         sent_signals = set(list(sent_signals)[-10000:])
     save_sent_signals(sent_signals)
