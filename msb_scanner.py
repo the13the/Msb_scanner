@@ -2,6 +2,8 @@ import ccxt
 import pandas as pd
 import requests
 import os
+import json
+import hashlib
 from datetime import datetime
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -9,33 +11,69 @@ CHAT_ID        = os.environ["CHAT_ID"]
 ZIGZAG_LEN     = 9
 FIB_FACTOR     = 0.33
 CANDLE_COUNT   = 300
+SENT_FILE      = "sent_signals.json"
 TIMEFRAMES     = {
     "15m": "15 dakika",
     "1h":  "1 saat",
     "4h":  "4 saat",
 }
 
-# OKX perpetual parite listesi
 PAIRS = [
-    "BTC/USDT:USDT","ETH/USDT:USDT","SOL/USDT:USDT","OKB/USDT:USDT","XRP/USDT:USDT",
-    "ADA/USDT:USDT","DOGE/USDT:USDT","SHIB/USDT:USDT","AVAX/USDT:USDT","LINK/USDT:USDT",
-    "DOT/USDT:USDT","TRX/USDT:USDT","LTC/USDT:USDT","BCH/USDT:USDT","NEAR/USDT:USDT",
-    "APT/USDT:USDT","SUI/USDT:USDT","ARB/USDT:USDT","OP/USDT:USDT","MATIC/USDT:USDT",
-    "STX/USDT:USDT","TIA/USDT:USDT","SEI/USDT:USDT","INJ/USDT:USDT","FTM/USDT:USDT",
-    "ATOM/USDT:USDT","ALGO/USDT:USDT","EGLD/USDT:USDT","IMX/USDT:USDT","FIL/USDT:USDT",
-    "GRT/USDT:USDT","ICP/USDT:USDT","AXS/USDT:USDT","SAND/USDT:USDT","MANA/USDT:USDT",
-    "THETA/USDT:USDT","FLOW/USDT:USDT","KAVA/USDT:USDT","ONE/USDT:USDT","CHZ/USDT:USDT",
-    "MINA/USDT:USDT","CRV/USDT:USDT","AAVE/USDT:USDT","FET/USDT:USDT","RENDER/USDT:USDT",
-    "WLD/USDT:USDT","AGIX/USDT:USDT","ARKM/USDT:USDT","LDO/USDT:USDT","MKR/USDT:USDT",
-    "COMP/USDT:USDT","SNX/USDT:USDT","UNI/USDT:USDT","SUSHI/USDT:USDT","YFI/USDT:USDT",
-    "1INCH/USDT:USDT","WOO/USDT:USDT","GMX/USDT:USDT","DYDX/USDT:USDT","ENS/USDT:USDT",
-    "ANKR/USDT:USDT","OCEAN/USDT:USDT","GALA/USDT:USDT","ENJ/USDT:USDT","BLUR/USDT:USDT",
-    "MASK/USDT:USDT","CYBER/USDT:USDT","STRK/USDT:USDT","PYTH/USDT:USDT","CELO/USDT:USDT",
-    "LRC/USDT:USDT","QTUM/USDT:USDT","PEPE/USDT:USDT","FLOKI/USDT:USDT","WIF/USDT:USDT",
-    "BONK/USDT:USDT","MEME/USDT:USDT","WAVES/USDT:USDT","ZIL/USDT:USDT","XMR/USDT:USDT",
-    "ZEC/USDT:USDT","DASH/USDT:USDT","IOST/USDT:USDT","ONT/USDT:USDT","RVN/USDT:USDT",
-    "NEO/USDT:USDT","HOT/USDT:USDT","XLM/USDT:USDT","DY/USDT:USDT","BNB/USDT:USDT",
+    "BTC/USDT:USDT","ETH/USDT:USDT","SOL/USDT:USDT","XRP/USDT:USDT","ADA/USDT:USDT",
+    "AVAX/USDT:USDT","LINK/USDT:USDT","DOT/USDT:USDT","MATIC/USDT:USDT","POL/USDT:USDT",
+    "TRX/USDT:USDT","LTC/USDT:USDT","BCH/USDT:USDT","ETC/USDT:USDT","ATOM/USDT:USDT",
+    "XLM/USDT:USDT","NEAR/USDT:USDT","APT/USDT:USDT","SUI/USDT:USDT","TON/USDT:USDT",
+    "ARB/USDT:USDT","OP/USDT:USDT","TIA/USDT:USDT","SEI/USDT:USDT","FET/USDT:USDT",
+    "RENDER/USDT:USDT","RNDR/USDT:USDT","TAO/USDT:USDT","GRT/USDT:USDT","AGIX/USDT:USDT",
+    "DOGE/USDT:USDT","SHIB/USDT:USDT","PEPE/USDT:USDT","WIF/USDT:USDT","BONK/USDT:USDT",
+    "FLOKI/USDT:USDT","BOME/USDT:USDT","OKB/USDT:USDT","UNI/USDT:USDT","AAVE/USDT:USDT",
+    "MKR/USDT:USDT","INJ/USDT:USDT","LDO/USDT:USDT","ICP/USDT:USDT","FIL/USDT:USDT",
+    "HBAR/USDT:USDT","STX/USDT:USDT","IMX/USDT:USDT","VET/USDT:USDT","THETA/USDT:USDT",
+    "RUNE/USDT:USDT","EGLD/USDT:USDT","ALGO/USDT:USDT","QNT/USDT:USDT","FLOW/USDT:USDT",
+    "FTM/USDT:USDT","SAND/USDT:USDT","MANA/USDT:USDT","APE/USDT:USDT","AXS/USDT:USDT",
+    "GALA/USDT:USDT","DYDX/USDT:USDT","CRV/USDT:USDT","CHZ/USDT:USDT","GMT/USDT:USDT",
+    "MINA/USDT:USDT","KAVA/USDT:USDT","COMP/USDT:USDT","SNX/USDT:USDT","WOO/USDT:USDT",
+    "JUP/USDT:USDT","PYTH/USDT:USDT","STRK/USDT:USDT","MANTA/USDT:USDT","ALT/USDT:USDT",
+    "ENS/USDT:USDT","BLUR/USDT:USDT","MEME/USDT:USDT","ORDI/USDT:USDT","SATS/USDT:USDT",
+    "TRB/USDT:USDT","GAS/USDT:USDT","AUDIO/USDT:USDT","MAGIC/USDT:USDT","SUSHI/USDT:USDT",
+    "YFI/USDT:USDT","1INCH/USDT:USDT","ZRX/USDT:USDT","BAT/USDT:USDT","ENJ/USDT:USDT",
+    "LRC/USDT:USDT","ANKR/USDT:USDT","KSM/USDT:USDT","QTUM/USDT:USDT","NEO/USDT:USDT",
+    "ONT/USDT:USDT","IOST/USDT:USDT","ZIL/USDT:USDT","ICX/USDT:USDT","OMG/USDT:USDT",
+    "WAVES/USDT:USDT","ONE/USDT:USDT","CELO/USDT:USDT","SKL/USDT:USDT","CHR/USDT:USDT",
+    "API3/USDT:USDT","BAND/USDT:USDT","PENDLE/USDT:USDT","PHB/USDT:USDT","TRU/USDT:USDT",
+    "LQTY/USDT:USDT","ID/USDT:USDT","AR/USDT:USDT","STORJ/USDT:USDT","BLZ/USDT:USDT",
+    "PERP/USDT:USDT","OGN/USDT:USDT","GTC/USDT:USDT","BAL/USDT:USDT","BADGER/USDT:USDT",
+    "ALPHA/USDT:USDT","BICO/USDT:USDT","FRONT/USDT:USDT","UNFI/USDT:USDT","BEL/USDT:USDT",
+    "DIA/USDT:USDT","RSR/USDT:USDT","NMR/USDT:USDT","LPT/USDT:USDT","UMA/USDT:USDT",
+    "REQ/USDT:USDT","STG/USDT:USDT","CORE/USDT:USDT","MEW/USDT:USDT","POPCAT/USDT:USDT",
+    "BRETT/USDT:USDT","NOT/USDT:USDT","IO/USDT:USDT","ZK/USDT:USDT","OMNI/USDT:USDT",
+    "TNSR/USDT:USDT","W/USDT:USDT","ENA/USDT:USDT","ETHFI/USDT:USDT","METIS/USDT:USDT",
+    "AEVO/USDT:USDT","DYM/USDT:USDT","RON/USDT:USDT","GLM/USDT:USDT","JTO/USDT:USDT",
+    "BIGTIME/USDT:USDT","BEAM/USDT:USDT","NTRN/USDT:USDT","CYBER/USDT:USDT","YGG/USDT:USDT",
+    "WLD/USDT:USDT","ARK/USDT:USDT","LUNC/USDT:USDT","XVS/USDT:USDT","OXT/USDT:USDT",
+    "RVN/USDT:USDT","FLM/USDT:USDT","ACH/USDT:USDT","DENT/USDT:USDT","CTSI/USDT:USDT",
+    "KNC/USDT:USDT","MTL/USDT:USDT","CVC/USDT:USDT","CLV/USDT:USDT","FUN/USDT:USDT",
+    "SC/USDT:USDT","SPELL/USDT:USDT","JASMY/USDT:USDT","PEOPLE/USDT:USDT","LUNA/USDT:USDT",
+    "BAKE/USDT:USDT","PUNDIX/USDT:USDT",
 ]
+
+
+def make_signal_id(symbol, timeframe, direction, inter_top, inter_bottom):
+    """Sinyal için benzersiz ID oluştur."""
+    key = f"{symbol}_{timeframe}_{direction}_{inter_top:.4f}_{inter_bottom:.4f}"
+    return hashlib.md5(key.encode()).hexdigest()
+
+
+def load_sent_signals():
+    if os.path.exists(SENT_FILE):
+        with open(SENT_FILE, "r") as f:
+            return set(json.load(f))
+    return set()
+
+
+def save_sent_signals(signals):
+    with open(SENT_FILE, "w") as f:
+        json.dump(list(signals), f)
 
 
 def send_telegram(msg):
@@ -146,28 +184,28 @@ def find_ob_bb(df, sig, zigzag_len=9):
     return inter_top, inter_bottom
 
 
-def scan_pair(exchange, symbol, timeframe, tf_label):
+def scan_pair(exchange, symbol, timeframe, tf_label, sent_signals):
     try:
         df = fetch_ohlcv(exchange, symbol, timeframe, limit=CANDLE_COUNT)
         if len(df) < ZIGZAG_LEN * 3:
-            return None
+            return None, None
         high_pts, low_pts = compute_zigzag(df, ZIGZAG_LEN)
         if len(high_pts) < 2 or len(low_pts) < 2:
-            return None
+            return None, None
         signals = detect_msb(high_pts, low_pts, FIB_FACTOR)
         if not signals:
-            return None
+            return None, None
         last_sig = signals[-1]
-        last_bar_time = df["ts"].iloc[-1]
-        sig_time = df.loc[last_sig["l0i"], "ts"] if last_sig["direction"] == 1 else df.loc[last_sig["h0i"], "ts"]
-        time_diff = (last_bar_time - sig_time).total_seconds()
-        tf_seconds = {"15m": 900, "1h": 3600, "4h": 14400}
-        if time_diff > tf_seconds[timeframe] * 10:
-            return None
         result = find_ob_bb(df, last_sig, ZIGZAG_LEN)
         if result is None:
-            return None
+            return None, None
         inter_top, inter_bottom = result
+
+        # Sinyal ID oluştur, daha önce gönderildiyse atla
+        sig_id = make_signal_id(symbol, timeframe, last_sig["direction"], inter_top, inter_bottom)
+        if sig_id in sent_signals:
+            return None, None
+
         pair_name = symbol.replace("/USDT:USDT", "USDT.P")
         now = datetime.utcnow().strftime("%H:%M UTC")
         msg = (
@@ -177,48 +215,56 @@ def scan_pair(exchange, symbol, timeframe, tf_label):
             f"📍 Bölge: <b>{inter_bottom:.4f} - {inter_top:.4f}</b>\n"
             f"🕐 Saat: {now}"
         )
-        return msg
+        return msg, sig_id
     except Exception as e:
         print(f"  Hata {symbol}: {e}")
-        return None
+        return None, None
 
 
 def main():
     exchange = ccxt.okx({"options": {"defaultType": "swap"}})
+    sent_signals = load_sent_signals()
+    print(f"Daha önce gönderilen sinyal sayısı: {len(sent_signals)}")
 
-    # Geçersiz pariteleri filtrele
-    print("Pariteler kontrol ediliyor...")
-    valid_pairs = []
+    print("Marketler yükleniyor...")
     try:
         markets = exchange.load_markets()
-        for p in PAIRS:
-            if p in markets:
-                valid_pairs.append(p)
-            else:
-                print(f"  Atlandı: {p}")
+        valid_pairs = [p for p in PAIRS if p in markets]
+        skipped = [p for p in PAIRS if p not in markets]
+        if skipped:
+            print(f"OKX'te olmayan: {', '.join(skipped)}")
     except Exception as e:
-        print(f"Market yükleme hatası: {e}")
-        valid_pairs = PAIRS  # hata olursa listeyi direkt kullan
+        print(f"Market yükleme hatası: {e}, liste direkt kullanılıyor.")
+        valid_pairs = PAIRS
 
-    print(f"{len(valid_pairs)} geçerli parite bulundu.")
+    print(f"{len(valid_pairs)} parite taranacak.")
     total_signals = 0
+    new_sent = set()
 
     for tf, tf_label in TIMEFRAMES.items():
         print(f"\n── {tf_label} taranıyor ──")
         tf_signals = 0
         for symbol in valid_pairs:
-            msg = scan_pair(exchange, symbol, tf, tf_label)
-            if msg:
-                print(f"  ✅ Sinyal: {symbol}")
+            msg, sig_id = scan_pair(exchange, symbol, tf, tf_label, sent_signals)
+            if msg and sig_id:
+                print(f"  ✅ Yeni sinyal: {symbol}")
                 send_telegram(msg)
+                new_sent.add(sig_id)
                 tf_signals += 1
                 total_signals += 1
-        print(f"  {tf_label}: {tf_signals} sinyal.")
+        print(f"  {tf_label}: {tf_signals} yeni sinyal.")
+
+    # Gönderilen sinyalleri kaydet
+    sent_signals.update(new_sent)
+    # Listeyi max 10000 ile sınırla (çok büyümesin)
+    if len(sent_signals) > 10000:
+        sent_signals = set(list(sent_signals)[-10000:])
+    save_sent_signals(sent_signals)
 
     if total_signals == 0:
-        print("Hiç sinyal bulunamadı.")
+        print("Yeni sinyal bulunamadı.")
     else:
-        print(f"\nToplam {total_signals} sinyal gönderildi.")
+        print(f"\nToplam {total_signals} yeni sinyal gönderildi.")
 
 
 if __name__ == "__main__":
