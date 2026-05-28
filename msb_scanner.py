@@ -4,16 +4,16 @@ import numpy as np
 
 PAIR = "DYDX/USDT:USDT"
 
-TIMEFRAMES = ["15m", "1h"]
+TIMEFRAME = "1h"
 
 MONTHS_BACK = 3
-PIVOT = 5
+PIVOT = 8
 
 SL_PCT = 0.01
 RR = 1.3
 LIMIT = 500
 
-MIN_SWEEP_PCT = 0.0008
+MIN_SWEEP_PCT = 0.004
 
 exchange = ccxt.okx({
     "enableRateLimit": True,
@@ -41,11 +41,7 @@ def fetch_data(symbol, timeframe):
 
     candles = []
 
-    tf_ms = (
-        15 * 60 * 1000
-        if timeframe == "15m"
-        else 60 * 60 * 1000
-    )
+    tf_ms = 60 * 60 * 1000
 
     while since < now_ms:
 
@@ -111,7 +107,7 @@ def fetch_data(symbol, timeframe):
 
 def signal(df):
 
-    if len(df) < 50:
+    if len(df) < 100:
         return None
 
     highs = df["h"].values
@@ -202,18 +198,14 @@ def signal(df):
     return None
 
 
-def backtest(df, tf):
+def backtest(df):
 
     trades = []
 
-    future_bars = (
-        24
-        if tf == "15m"
-        else 12
-    )
+    future_bars = 12
 
     for i in range(
-        50,
+        100,
         len(df) - future_bars
     ):
 
@@ -281,58 +273,57 @@ def backtest(df, tf):
     return trades
 
 
-print("===== DYDX V5 REPORT =====")
+print("===== DYDX V6 REPORT =====")
 
-for tf in TIMEFRAMES:
+print(
+    "Loading",
+    PAIR,
+    TIMEFRAME
+)
 
-    print(f"\n===== {tf.upper()} =====")
+df = fetch_data(
+    PAIR,
+    TIMEFRAME
+)
 
-    print(
-        "Loading",
-        PAIR,
-        tf
-    )
+if df.empty:
 
-    df = fetch_data(
-        PAIR,
-        tf
-    )
+    print("NO DATA")
 
-    if df.empty:
-
-        print("NO DATA")
-        continue
+else:
 
     print(
         "Candles:",
         len(df)
     )
 
-    results = backtest(
-        df,
-        tf
-    )
+    results = backtest(df)
 
     if len(results) == 0:
 
         print("NO SIGNAL")
-        continue
 
-    wins = sum(results)
-    losses = len(results) - wins
+    else:
 
-    wr = round(
-        (
-            wins
-            / len(results)
-        ) * 100,
-        2
-    )
+        wins = sum(results)
 
-    print(
-        f"{PAIR} "
-        f"| Trades:{len(results)} "
-        f"| Win:{wins} "
-        f"Loss:{losses} "
-        f"| WR:{wr}%"
-    )
+        losses = (
+            len(results)
+            - wins
+        )
+
+        wr = round(
+            (
+                wins
+                / len(results)
+            ) * 100,
+            2
+        )
+
+        print(
+            f"{PAIR} "
+            f"| Trades:{len(results)} "
+            f"| Win:{wins} "
+            f"Loss:{losses} "
+            f"| WR:{wr}%"
+        )
