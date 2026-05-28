@@ -36,17 +36,17 @@ def fetch_data(symbol, timeframe):
     now = exchange.milliseconds()
     since = now - MONTHS_BACK * 30 * 24 * 60 * 60 * 1000
 
-    all_data = []
+    data = []
     tf_ms = 60 * 60 * 1000
 
     while since < now:
         batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=LIMIT)
         if not batch:
             break
-        all_data.extend(batch)
+        data.extend(batch)
         since = batch[-1][0] + tf_ms
 
-    df = pd.DataFrame(all_data, columns=["ts","o","h","l","c","v"])
+    df = pd.DataFrame(data, columns=["ts","o","h","l","c","v"])
     df.drop_duplicates("ts", inplace=True)
     df.reset_index(drop=True, inplace=True)
     return df
@@ -69,7 +69,7 @@ def atr(df, length=14):
 
 
 # =========================
-# SWINGS (SAFE)
+# SWINGS (SAFE FIXED)
 # =========================
 def swings(df):
     if len(df) < PIVOT * 2 + 10:
@@ -78,13 +78,14 @@ def swings(df):
     highs = df["h"].values
     lows = df["l"].values
 
-    sh, sl = [], []
+    sh = []
+    sl = []
 
     for i in range(PIVOT, len(df) - PIVOT):
         if highs[i] == np.max(highs[i-PIVOT:i+PIVOT+1]):
-            sh.append(highs[i])
+            sh.append(float(highs[i]))   # FORCE SAFE TYPE
         if lows[i] == np.min(lows[i-PIVOT:i+PIVOT+1]):
-            sl.append(lows[i])
+            sl.append(float(lows[i]))    # FORCE SAFE TYPE
 
     return sh, sl
 
@@ -108,7 +109,6 @@ def detect_fvg(df, i):
 
     if c1["h"] < c3["l"]:
         return "bull"
-
     if c1["l"] > c3["h"]:
         return "bear"
 
@@ -116,7 +116,7 @@ def detect_fvg(df, i):
 
 
 # =========================
-# BACKTEST (STATE MACHINE)
+# BACKTEST (CRASH FIXED)
 # =========================
 def backtest(df):
 
@@ -134,6 +134,12 @@ def backtest(df):
 
     sh, sl = swings(df)
 
+    # 🔥 HARD SAFETY FIX
+    if not isinstance(sh, list):
+        sh = list(sh)
+    if not isinstance(sl, list):
+        sl = list(sl)
+
     if len(sh) == 0 or len(sl) == 0:
         return [], []
 
@@ -147,26 +153,24 @@ def backtest(df):
             i += 1
             continue
 
-        # safety swing access
-        last_sh = sh[-1] if sh else None
-        last_sl = sl[-1] if sl else None
-
-        if last_sh is None or last_sl is None:
+        # 🔥 SAFE ACCESS (NO INDEX CRASH)
+        if len(sh) == 0 or len(sl) == 0:
             i += 1
             continue
+
+        last_sh = sh[-1]
+        last_sl = sl[-1]
 
         candle = df.iloc[i]
 
         sweep = None
-        disp = False
         fvg = detect_fvg(df, i)
 
         # =========================
-        # 1. SWEEP DETECTION
+        # SWEEP
         # =========================
         if candle["l"] < last_sl:
             sweep = "LONG"
-
         elif candle["h"] > last_sh:
             sweep = "SHORT"
 
@@ -174,17 +178,15 @@ def backtest(df):
         # STATE 0
         # =========================
         if state is None:
-
             if sweep:
                 state = "sweep"
                 direction = sweep
                 setup_i = i
-
             i += 1
             continue
 
         # =========================
-        # STATE 1: DISPLACEMENT
+        # STATE 1
         # =========================
         if state == "sweep":
 
@@ -200,7 +202,7 @@ def backtest(df):
             continue
 
         # =========================
-        # STATE 2: FVG
+        # STATE 2
         # =========================
         if state == "disp":
 
@@ -216,12 +218,11 @@ def backtest(df):
             continue
 
         # =========================
-        # STATE 3: ENTRY
+        # STATE 3 ENTRY
         # =========================
         if state == "ready":
 
             entry_idx = i + 1
-
             if entry_idx >= len(df):
                 break
 
@@ -282,7 +283,7 @@ def backtest(df):
 # =========================
 # RUN
 # =========================
-print("===== DYDX V6 FIXED STATE MACHINE REPORT =====")
+print("===== DYDX V6.1 FIXED STATE MACHINE REPORT =====")
 
 df = fetch_data(PAIR, TIMEFRAME)
 
