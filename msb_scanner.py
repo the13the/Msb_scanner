@@ -6,14 +6,10 @@ import datetime
 PAIR = "DYDX/USDT:USDT"
 TIMEFRAME = "1h"
 
-# 🔥 UPGRADE: 12 AY
 MONTHS_BACK = 12
 
-PIVOT = 8
-LIMIT = 500
-
 SL_PCT = 0.01
-RR = 1.4
+RR = 1.5
 FUTURE_BARS = 12
 
 MIN_SWEEP_PCT = 0.003
@@ -29,26 +25,17 @@ exchange = ccxt.okx({
 # -------------------------
 def fetch_data(symbol, timeframe):
     now = exchange.milliseconds()
-
-    # 12 months back
     since = now - MONTHS_BACK * 30 * 24 * 60 * 60 * 1000
 
     tf_ms = 60 * 60 * 1000
     candles = []
 
     while since < now:
-        batch = exchange.fetch_ohlcv(
-            symbol,
-            timeframe=timeframe,
-            since=since,
-            limit=LIMIT
-        )
-
+        batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=500)
         if not batch:
             break
 
         candles.extend(batch)
-
         last = batch[-1][0]
 
         if last <= since:
@@ -56,70 +43,59 @@ def fetch_data(symbol, timeframe):
 
         since = last + tf_ms
 
-    df = pd.DataFrame(candles, columns=["ts", "o", "h", "l", "c", "v"])
+    df = pd.DataFrame(candles, columns=["ts","o","h","l","c","v"])
     df.drop_duplicates(subset=["ts"], inplace=True)
     df.reset_index(drop=True, inplace=True)
-
     return df
 
 
 # -------------------------
-# SESSION FILTER
+# STRUCTURE (REAL SWING BASED ON FRAGMENTS)
 # -------------------------
-def is_trading_session(ts):
-    dt = datetime.datetime.utcfromtimestamp(ts / 1000)
-    hour = dt.hour
-
-    return 12 <= hour <= 20
-
-
-# -------------------------
-# SWINGS
-# -------------------------
-def get_swings(df):
+def get_structure(df):
     highs = df["h"].values
     lows = df["l"].values
 
-    swing_highs = []
-    swing_lows = []
+    structure_highs = []
+    structure_lows = []
 
-    for i in range(PIVOT, len(df) - PIVOT):
+    # daha sıkı structure detection
+    for i in range(3, len(df) - 3):
 
-        if highs[i] >= np.max(highs[i-PIVOT:i+PIVOT+1]):
-            swing_highs.append(highs[i])
+        if highs[i] > highs[i-1] and highs[i] > highs[i+1]:
+            structure_highs.append(highs[i])
 
-        if lows[i] <= np.min(lows[i-PIVOT:i+PIVOT+1]):
-            swing_lows.append(lows[i])
+        if lows[i] < lows[i-1] and lows[i] < lows[i+1]:
+            structure_lows.append(lows[i])
 
-    return swing_highs, swing_lows
+    return structure_highs, structure_lows
 
 
 # -------------------------
-# SIGNAL
+# SIGNAL ENGINE (V7 FIX)
 # -------------------------
 def signal(df):
-    if len(df) < 200:
+    if len(df) < 150:
         return None
 
-    # SESSION FILTER
-    if not is_trading_session(df["ts"].iloc[-1]):
+    structure_highs, structure_lows = get_structure(df)
+
+    if len(structure_highs) < 3 or len(structure_lows) < 3:
         return None
 
-    swing_highs, swing_lows = get_swings(df)
+    last_high = structure_highs[-1]
+    prev_high = structure_highs[-2]
 
-    if len(swing_highs) < 3 or len(swing_lows) < 3:
-        return None
-
-    last_high = swing_highs[-1]
-    prev_high = swing_highs[-2]
-
-    last_low = swing_lows[-1]
-    prev_low = swing_lows[-2]
+    last_low = structure_lows[-1]
+    prev_low = structure_lows[-2]
 
     h = df["h"].iloc[-1]
     l = df["l"].iloc[-1]
     c = df["c"].iloc[-1]
 
+    # -------------------------
+    # REAL SWEEP (LIQUIDITY GRAB)
+    # -------------------------
     sweep_high = (
         h > last_high and
         c < last_high and
@@ -132,9 +108,21 @@ def signal(df):
         ((last_low - l) / last_low) > MIN_SWEEP_PCT
     )
 
+    # -------------------------
+    # TRUE BOS (BREAK OF STRUCTURE)
+    # -------------------------
+    bos_up = c > last_high
+    bos_down = c < last_low
+
+    # -------------------------
+    # STRUCTURE TREND
+    # -------------------------
     trend_up = last_low > prev_low
     trend_down = last_high < prev_high
 
+    # -------------------------
+    # FINAL LOGIC (CLEAN VERSION)
+    # -------------------------
     if trend_up and sweep_low:
         return "LONG"
 
@@ -145,12 +133,12 @@ def signal(df):
 
 
 # -------------------------
-# BACKTEST FIX (SMALL BUT IMPORTANT)
+# BACKTEST
 # -------------------------
 def backtest(df):
     trades = []
 
-    for i in range(200, len(df) - FUTURE_BARS):
+    for i in range(150, len(df) - FUTURE_BARS):
 
         sub = df.iloc[:i]
         side = signal(sub)
@@ -194,7 +182,7 @@ def backtest(df):
 # -------------------------
 # RUN
 # -------------------------
-print("===== DYDX V6.3 (12M TEST) REPORT =====")
+print("===== DYDX V7 FIX REPORT =====")
 print("Loading", PAIR, TIMEFRAME)
 
 df = fetch_data(PAIR, TIMEFRAME)
