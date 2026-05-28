@@ -14,7 +14,6 @@ ATR_LEN = 14
 SL_ATR_MULT = 1.2
 RR = 2.2
 
-SWEEP_WINDOW = 5
 DISPLACEMENT_WINDOW = 5
 FVG_WINDOW = 5
 
@@ -69,10 +68,10 @@ def atr(df, length=14):
 
 
 # =========================
-# SWINGS (SAFE FIXED)
+# SWINGS (100% SAFE FIX)
 # =========================
 def swings(df):
-    if len(df) < PIVOT * 2 + 10:
+    if df is None or len(df) < (PIVOT * 2 + 5):
         return [], []
 
     highs = df["h"].values
@@ -82,10 +81,19 @@ def swings(df):
     sl = []
 
     for i in range(PIVOT, len(df) - PIVOT):
-        if highs[i] == np.max(highs[i-PIVOT:i+PIVOT+1]):
-            sh.append(float(highs[i]))   # FORCE SAFE TYPE
-        if lows[i] == np.min(lows[i-PIVOT:i+PIVOT+1]):
-            sl.append(float(lows[i]))    # FORCE SAFE TYPE
+        try:
+            if highs[i] == np.max(highs[i-PIVOT:i+PIVOT+1]):
+                sh.append(float(highs[i]))
+            if lows[i] == np.min(lows[i-PIVOT:i+PIVOT+1]):
+                sl.append(float(lows[i]))
+        except:
+            continue
+
+    # 🔥 HARD GUARANTEE: always lists
+    if not isinstance(sh, list):
+        sh = []
+    if not isinstance(sl, list):
+        sl = []
 
     return sh, sl
 
@@ -116,7 +124,7 @@ def detect_fvg(df, i):
 
 
 # =========================
-# BACKTEST (CRASH FIXED)
+# BACKTEST
 # =========================
 def backtest(df):
 
@@ -134,11 +142,11 @@ def backtest(df):
 
     sh, sl = swings(df)
 
-    # 🔥 HARD SAFETY FIX
+    # 🔥 FINAL SAFETY CHECK
     if not isinstance(sh, list):
-        sh = list(sh)
+        sh = []
     if not isinstance(sl, list):
-        sl = list(sl)
+        sl = []
 
     if len(sh) == 0 or len(sl) == 0:
         return [], []
@@ -153,7 +161,6 @@ def backtest(df):
             i += 1
             continue
 
-        # 🔥 SAFE ACCESS (NO INDEX CRASH)
         if len(sh) == 0 or len(sl) == 0:
             i += 1
             continue
@@ -283,7 +290,7 @@ def backtest(df):
 # =========================
 # RUN
 # =========================
-print("===== DYDX V6.1 FIXED STATE MACHINE REPORT =====")
+print("===== DYDX V6.2 FIXED STATE MACHINE REPORT =====")
 
 df = fetch_data(PAIR, TIMEFRAME)
 
