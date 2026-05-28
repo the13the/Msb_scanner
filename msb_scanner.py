@@ -12,9 +12,10 @@ PIVOT = 6
 ATR_LEN = 14
 
 SL_ATR_MULT = 1.2
-RR = 2.0
+RR = 1.8
 
-CONFIRM_BARS = 3
+MSS_WINDOW = 5   # 🔥 FIX: MSS artık future window içinde aranıyor
+CONFIRM_BARS = 1
 
 FEE = 0.0004
 SLIPPAGE = 0.0002
@@ -23,6 +24,7 @@ exchange = ccxt.okx({
     "enableRateLimit": True,
     "options": {"defaultType": "swap"}
 })
+
 
 # =========================
 # DATA
@@ -64,7 +66,7 @@ def atr(df, length=14):
 
 
 # =========================
-# SWING POINTS
+# SWINGS
 # =========================
 def swings(df):
     highs = df["h"].values
@@ -83,7 +85,7 @@ def swings(df):
 
 
 # =========================
-# FVG DETECTION (simple 3-candle imbalance)
+# FVG (optional bonus)
 # =========================
 def find_fvg(df, i):
     if i < 2:
@@ -92,29 +94,16 @@ def find_fvg(df, i):
     c1 = df.iloc[i-2]
     c3 = df.iloc[i]
 
-    # bullish FVG
     if c1["h"] < c3["l"]:
-        return ("bull", c1["h"], c3["l"])
-
-    # bearish FVG
+        return "bull"
     if c1["l"] > c3["h"]:
-        return ("bear", c3["h"], c1["l"])
+        return "bear"
 
     return None
 
 
 # =========================
-# MSS CHECK
-# =========================
-def mss_bull(df, last_swing_high):
-    return df["c"].iloc[-1] > last_swing_high
-
-def mss_bear(df, last_swing_low):
-    return df["c"].iloc[-1] < last_swing_low
-
-
-# =========================
-# SIGNAL ENGINE
+# SIGNAL (RELAXED LOGIC)
 # =========================
 def signal(df):
     if len(df) < 120:
@@ -130,21 +119,25 @@ def signal(df):
 
     price = df["c"].iloc[-1]
 
-    # LIQUIDITY SWEEP (wick based)
+    # 🔥 SWEEP (MAIN TRIGGER)
     sweep_low = df["l"].iloc[-1] < last_sl
     sweep_high = df["h"].iloc[-1] > last_sh
 
-    # MSS confirmation
-    bull_mss = mss_bull(df, last_sh)
-    bear_mss = mss_bear(df, last_sl)
+    # MSS WINDOW (RELAXED)
+    future = df.iloc[-MSS_WINDOW:]
 
-    # FVG
+    bull_mss = future["c"].max() > last_sh
+    bear_mss = future["c"].min() < last_sl
+
+    # OPTIONAL FVG (NOT REQUIRED)
     fvg = find_fvg(df, len(df)-1)
 
-    if sweep_low and bull_mss and fvg and fvg[0] == "bull":
+    # LONG SETUP
+    if sweep_low and bull_mss:
         return "LONG"
 
-    if sweep_high and bear_mss and fvg and fvg[0] == "bear":
+    # SHORT SETUP
+    if sweep_high and bear_mss:
         return "SHORT"
 
     return None
@@ -178,7 +171,6 @@ def backtest(df):
             i += 1
             continue
 
-        # WAIT CONFIRMATION (important V3 logic)
         entry_idx = i + CONFIRM_BARS
         if entry_idx >= len(df):
             break
@@ -200,6 +192,7 @@ def backtest(df):
 
         for _, row in future.iterrows():
 
+            # SL FIRST
             if side == "LONG":
                 if row["l"] <= sl:
                     result = -1
@@ -211,7 +204,7 @@ def backtest(df):
                 if row["h"] >= sl:
                     result = -1
                     break
-                if row["l"] <= tp:
+                if row["l"] >= tp:
                     result = 1
                     break
 
@@ -229,7 +222,7 @@ def backtest(df):
 
         trades.append(result > 0)
 
-        i += CONFIRM_BARS + 1
+        i += 1
 
     return trades, curve
 
@@ -237,7 +230,7 @@ def backtest(df):
 # =========================
 # RUN
 # =========================
-print("===== DYDX V3 INSTITUTIONAL REPORT =====")
+print("===== DYDX V3.1 FIXED REPORT =====")
 
 df = fetch_data(PAIR, TIMEFRAME)
 
@@ -257,6 +250,5 @@ else:
 
     wr = round(wins / len(trades) * 100, 2)
 
-    final = curve[-1]
     print(f"Trades:{len(trades)} | Win:{wins} Loss:{losses} | WR:{wr}%")
-    print(f"Final Equity: {round(final,3)}")
+    print(f"Final Equity: {round(curve[-1],3)}")
