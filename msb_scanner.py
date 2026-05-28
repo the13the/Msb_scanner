@@ -24,29 +24,40 @@ LIMIT = 200
 ZIGZAG_LEN = 9
 CACHE_FILE = "sent_signals.json"
 
+
 # ==========================
 # CACHE
 # ==========================
 def load_sent_signals():
 
-    if os.path.exists(CACHE_FILE):
-        try:
-            with open(CACHE_FILE, "r") as f:
-                return json.load(f)
-        except:
+    if not os.path.exists(CACHE_FILE):
+        return {}
+
+    try:
+        with open(CACHE_FILE, "r") as f:
+            data = json.load(f)
+
+        # Eski bozuk format geldiyse sıfırla
+        if not isinstance(data, dict):
             return {}
 
-    return {}
+        return data
+
+    except:
+        return {}
 
 
 def save_sent_signals(data):
 
-    with open(CACHE_FILE, "w") as f:
-        json.dump(data, f)
+    try:
+        with open(CACHE_FILE, "w") as f:
+            json.dump(data, f)
+    except:
+        pass
 
 
 # ==========================
-# TELEGRAM MESAJ
+# TELEGRAM
 # ==========================
 def send_telegram_message(message):
 
@@ -57,7 +68,10 @@ def send_telegram_message(message):
         "text": message
     }
 
-    requests.post(url, data=payload)
+    try:
+        requests.post(url, data=payload, timeout=10)
+    except:
+        pass
 
 
 # ==========================
@@ -67,18 +81,24 @@ def get_okx_pairs():
 
     url = "https://www.okx.com/api/v5/public/instruments?instType=SWAP"
 
-    response = requests.get(url).json()
+    try:
+        response = requests.get(url, timeout=15).json()
 
-    pairs = []
+        data = response.get("data", [])
 
-    for x in response.get("data", []):
+        pairs = []
 
-        inst_id = x.get("instId")
+        for item in data:
 
-        if inst_id and "USDT" in inst_id:
-            pairs.append(inst_id)
+            inst_id = item.get("instId")
 
-    return pairs
+            if inst_id and "USDT" in inst_id:
+                pairs.append(inst_id)
+
+        return pairs
+
+    except:
+        return []
 
 
 # ==========================
@@ -86,34 +106,43 @@ def get_okx_pairs():
 # ==========================
 def get_candles(symbol, timeframe):
 
-    url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar={timeframe}&limit={LIMIT}"
+    url = (
+        f"https://www.okx.com/api/v5/market/candles"
+        f"?instId={symbol}&bar={timeframe}&limit={LIMIT}"
+    )
 
-    response = requests.get(url).json()
+    try:
+        response = requests.get(url, timeout=15).json()
 
-    rows = response.get("data", [])
+        rows = response.get("data", [])
 
-    if len(rows) == 0:
+        if len(rows) == 0:
+            return None
+
+        df = pd.DataFrame(rows, columns=[
+            "ts",
+            "open",
+            "high",
+            "low",
+            "close",
+            "vol",
+            "volCcy",
+            "volCcyQuote",
+            "confirm"
+        ])
+
+        df = df[::-1].reset_index(drop=True)
+
+        df["high"] = pd.to_numeric(df["high"], errors="coerce")
+        df["low"] = pd.to_numeric(df["low"], errors="coerce")
+        df["close"] = pd.to_numeric(df["close"], errors="coerce")
+
+        df.dropna(inplace=True)
+
+        return df
+
+    except:
         return None
-
-    df = pd.DataFrame(rows, columns=[
-        "ts",
-        "open",
-        "high",
-        "low",
-        "close",
-        "vol",
-        "volCcy",
-        "volCcyQuote",
-        "confirm"
-    ])
-
-    df = df[::-1].reset_index(drop=True)
-
-    df["high"] = df["high"].astype(float)
-    df["low"] = df["low"].astype(float)
-    df["close"] = df["close"].astype(float)
-
-    return df
 
 
 # ==========================
@@ -121,27 +150,32 @@ def get_candles(symbol, timeframe):
 # ==========================
 def detect_msb(df):
 
-    if len(df) < 20:
+    if df is None or len(df) < 20:
         return None
 
-    highs = df["high"].rolling(ZIGZAG_LEN).max()
-    lows = df["low"].rolling(ZIGZAG_LEN).min()
+    try:
 
-    recent_high = highs.iloc[-1]
-    previous_high = highs.iloc[-10]
+        highs = df["high"].rolling(ZIGZAG_LEN).max()
+        lows = df["low"].rolling(ZIGZAG_LEN).min()
 
-    recent_low = lows.iloc[-1]
-    previous_low = lows.iloc[-10]
+        recent_high = highs.iloc[-1]
+        previous_high = highs.iloc[-10]
 
-    price = df["close"].iloc[-1]
+        recent_low = lows.iloc[-1]
+        previous_low = lows.iloc[-10]
 
-    if recent_high > previous_high and price > previous_high:
-        return "LONG"
+        price = df["close"].iloc[-1]
 
-    elif recent_low < previous_low and price < previous_low:
-        return "SHORT"
+        if recent_high > previous_high and price > previous_high:
+            return "LONG"
 
-    return None
+        if recent_low < previous_low and price < previous_low:
+            return "SHORT"
+
+        return None
+
+    except:
+        return None
 
 
 # ==========================
@@ -165,9 +199,6 @@ def scan():
 
                 df = get_candles(pair, tf)
 
-                if df is None:
-                    continue
-
                 signal = detect_msb(df)
 
                 if not signal:
@@ -182,6 +213,7 @@ def scan():
                     f"{candle_time}"
                 )
 
+                # Aynı mum tekrar gönderilmesin
                 if signal_key in sent_signals:
                     continue
 
@@ -204,7 +236,6 @@ def scan():
 
             except Exception as e:
                 print(f"{pair} hata: {e}")
-                continue
 
     save_sent_signals(sent_signals)
 
