@@ -1,6 +1,7 @@
 import ccxt
 import pandas as pd
 import numpy as np
+import datetime
 
 PAIR = "DYDX/USDT:USDT"
 TIMEFRAME = "1h"
@@ -10,7 +11,7 @@ PIVOT = 8
 LIMIT = 500
 
 SL_PCT = 0.01
-RR = 1.5
+RR = 1.4
 FUTURE_BARS = 12
 
 MIN_SWEEP_PCT = 0.003
@@ -22,7 +23,7 @@ exchange = ccxt.okx({
 
 
 # -------------------------
-# DATA
+# DATA FETCH
 # -------------------------
 def fetch_data(symbol, timeframe):
     now = exchange.milliseconds()
@@ -32,11 +33,18 @@ def fetch_data(symbol, timeframe):
     candles = []
 
     while since < now:
-        batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=LIMIT)
+        batch = exchange.fetch_ohlcv(
+            symbol,
+            timeframe=timeframe,
+            since=since,
+            limit=LIMIT
+        )
+
         if not batch:
             break
 
         candles.extend(batch)
+
         last = batch[-1][0]
 
         if last <= since:
@@ -44,7 +52,7 @@ def fetch_data(symbol, timeframe):
 
         since = last + tf_ms
 
-    df = pd.DataFrame(candles, columns=["ts","o","h","l","c","v"])
+    df = pd.DataFrame(candles, columns=["ts", "o", "h", "l", "c", "v"])
     df.drop_duplicates(subset=["ts"], inplace=True)
     df.reset_index(drop=True, inplace=True)
 
@@ -52,26 +60,19 @@ def fetch_data(symbol, timeframe):
 
 
 # -------------------------
-# ATR (VOLATILITY FILTER)
+# SESSION FILTER (NEW)
+# UTC time: London + NY active zone
 # -------------------------
-def atr(df, period=14):
-    high = df["h"]
-    low = df["l"]
-    close = df["c"]
+def is_trading_session(ts):
+    dt = datetime.datetime.utcfromtimestamp(ts / 1000)
+    hour = dt.hour
 
-    tr = np.maximum(
-        high - low,
-        np.maximum(
-            abs(high - close.shift(1)),
-            abs(low - close.shift(1))
-        )
-    )
-
-    return tr.rolling(period).mean()
+    # 12:00 - 20:00 UTC = high liquidity session
+    return 12 <= hour <= 20
 
 
 # -------------------------
-# SWINGS
+# SWING DETECTION
 # -------------------------
 def get_swings(df):
     highs = df["h"].values
@@ -81,6 +82,7 @@ def get_swings(df):
     swing_lows = []
 
     for i in range(PIVOT, len(df) - PIVOT):
+
         if highs[i] >= np.max(highs[i-PIVOT:i+PIVOT+1]):
             swing_highs.append(highs[i])
 
@@ -91,10 +93,14 @@ def get_swings(df):
 
 
 # -------------------------
-# SIGNAL ENGINE V6.2
+# SIGNAL ENGINE (V6.3)
 # -------------------------
 def signal(df):
-    if len(df) < 150:
+    if len(df) < 120:
+        return None
+
+    # SESSION FILTER
+    if not is_trading_session(df["ts"].iloc[-1]):
         return None
 
     swing_highs, swing_lows = get_swings(df)
@@ -113,7 +119,7 @@ def signal(df):
     c = df["c"].iloc[-1]
 
     # -------------------------
-    # SWEEP LOGIC (REAL)
+    # REAL SWEEP LOGIC
     # -------------------------
     sweep_high = (
         h > last_high and
@@ -128,36 +134,14 @@ def signal(df):
     )
 
     # -------------------------
-    # TREND FILTER (CLEAN)
+    # SIMPLE TREND FILTER
     # -------------------------
     trend_up = last_low > prev_low
     trend_down = last_high < prev_high
 
     # -------------------------
-    # DISPLACEMENT (CRITICAL UPGRADE)
+    # FINAL SIGNAL
     # -------------------------
-    body = abs(c - df["o"].iloc[-1])
-    candle_range = h - l
-
-    displacement = body > (candle_range * 0.6)
-
-    # -------------------------
-    # ATR FILTER (CHOP FILTER)
-    # -------------------------
-    atr_val = atr(df).iloc[-1]
-    avg_range = (df["h"] - df["l"]).rolling(20).mean().iloc[-1]
-
-    if np.isnan(atr_val) or np.isnan(avg_range):
-        return None
-
-    volatility_ok = atr_val > (avg_range * 0.8)
-
-    # -------------------------
-    # FINAL LOGIC
-    # -------------------------
-    if not (displacement and volatility_ok):
-        return None
-
     if trend_up and sweep_low:
         return "LONG"
 
@@ -173,7 +157,7 @@ def signal(df):
 def backtest(df):
     trades = []
 
-    for i in range(150, len(df) - FUTURE_BARS):
+    for i in range(120, len(df) - FUTURE_BARS):
 
         sub = df.iloc[:i]
         side = signal(sub)
@@ -186,7 +170,6 @@ def backtest(df):
         if side == "LONG":
             sl = entry * (1 - SL_PCT)
             tp = entry + (entry - sl) * RR
-
         else:
             sl = entry * (1 + SL_PCT)
             tp = entry - (sl - entry) * RR
@@ -203,9 +186,8 @@ def backtest(df):
                     break
                 if row["l"] <= sl:
                     break
-
             else:
-                if row["l"] <= tp:
+                if row["l"] >= tp:
                     result = True
                     break
                 if row["h"] >= sl:
@@ -219,7 +201,7 @@ def backtest(df):
 # -------------------------
 # RUN
 # -------------------------
-print("===== DYDX V6.2 REPORT =====")
+print("===== DYDX V6.3 REPORT =====")
 print("Loading", PAIR, TIMEFRAME)
 
 df = fetch_data(PAIR, TIMEFRAME)
