@@ -12,10 +12,9 @@ PIVOT = 6
 ATR_LEN = 14
 
 SL_ATR_MULT = 1.2
-RR = 1.8
+RR = 2.2
 
-MSS_WINDOW = 5   # 🔥 FIX: MSS artık future window içinde aranıyor
-CONFIRM_BARS = 1
+DISPLACEMENT_ATR = 1.5   # 🔥 NEW: strong impulse threshold
 
 FEE = 0.0004
 SLIPPAGE = 0.0002
@@ -33,17 +32,17 @@ def fetch_data(symbol, timeframe):
     now = exchange.milliseconds()
     since = now - MONTHS_BACK * 30 * 24 * 60 * 60 * 1000
 
-    all_candles = []
+    all_data = []
     tf_ms = 60 * 60 * 1000
 
     while since < now:
         batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=LIMIT)
         if not batch:
             break
-        all_candles.extend(batch)
+        all_data.extend(batch)
         since = batch[-1][0] + tf_ms
 
-    df = pd.DataFrame(all_candles, columns=["ts","o","h","l","c","v"])
+    df = pd.DataFrame(all_data, columns=["ts","o","h","l","c","v"])
     df.drop_duplicates("ts", inplace=True)
     df.reset_index(drop=True, inplace=True)
     return df
@@ -72,8 +71,7 @@ def swings(df):
     highs = df["h"].values
     lows = df["l"].values
 
-    sh = []
-    sl = []
+    sh, sl = [], []
 
     for i in range(PIVOT, len(df) - PIVOT):
         if highs[i] == np.max(highs[i-PIVOT:i+PIVOT+1]):
@@ -85,9 +83,17 @@ def swings(df):
 
 
 # =========================
-# FVG (optional bonus)
+# DISPLACEMENT FILTER
 # =========================
-def find_fvg(df, i):
+def displacement(df, i, atr_val):
+    body = abs(df["c"].iloc[i] - df["o"].iloc[i])
+    return body > atr_val * DISPLACEMENT_ATR
+
+
+# =========================
+# FVG DETECTION
+# =========================
+def fvg_zone(df, i):
     if i < 2:
         return None
 
@@ -95,18 +101,23 @@ def find_fvg(df, i):
     c3 = df.iloc[i]
 
     if c1["h"] < c3["l"]:
-        return "bull"
+        return ("bull", c1["h"], c3["l"])
+
     if c1["l"] > c3["h"]:
-        return "bear"
+        return ("bear", c3["h"], c1["l"])
 
     return None
 
 
 # =========================
-# SIGNAL (RELAXED LOGIC)
+# SIGNAL ENGINE (V4 CORE)
 # =========================
 def signal(df):
     if len(df) < 120:
+        return None
+
+    atr_val = atr(df, ATR_LEN).iloc[-1]
+    if np.isnan(atr_val):
         return None
 
     sh, sl = swings(df)
@@ -117,28 +128,24 @@ def signal(df):
     last_sh = sh[-1][1]
     last_sl = sl[-1][1]
 
-    price = df["c"].iloc[-1]
+    i = len(df) - 1
 
-    # 🔥 SWEEP (MAIN TRIGGER)
-    sweep_low = df["l"].iloc[-1] < last_sl
-    sweep_high = df["h"].iloc[-1] > last_sh
+    sweep_low = df["l"].iloc[i] < last_sl
+    sweep_high = df["h"].iloc[i] > last_sh
 
-    # MSS WINDOW (RELAXED)
-    future = df.iloc[-MSS_WINDOW:]
+    # 🔥 DISPLACEMENT CONFIRMATION
+    if not displacement(df, i, atr_val):
+        return None
 
-    bull_mss = future["c"].max() > last_sh
-    bear_mss = future["c"].min() < last_sl
-
-    # OPTIONAL FVG (NOT REQUIRED)
-    fvg = find_fvg(df, len(df)-1)
+    fvg = fvg_zone(df, i)
 
     # LONG SETUP
-    if sweep_low and bull_mss:
-        return "LONG"
+    if sweep_low and fvg and fvg[0] == "bull":
+        return ("LONG", fvg)
 
     # SHORT SETUP
-    if sweep_high and bear_mss:
-        return "SHORT"
+    if sweep_high and fvg and fvg[0] == "bear":
+        return ("SHORT", fvg)
 
     return None
 
@@ -160,20 +167,16 @@ def backtest(df):
     while i < len(df) - future_bars:
 
         sub = df.iloc[:i]
-        side = signal(sub)
+        sig = signal(sub)
 
-        if side is None:
+        if sig is None:
             i += 1
             continue
+
+        side, fvg = sig
 
         atr_val = sub["atr"].iloc[-1]
-        if np.isnan(atr_val):
-            i += 1
-            continue
-
-        entry_idx = i + CONFIRM_BARS
-        if entry_idx >= len(df):
-            break
+        entry_idx = i + 1
 
         entry = df["o"].iloc[entry_idx]
 
@@ -192,7 +195,6 @@ def backtest(df):
 
         for _, row in future.iterrows():
 
-            # SL FIRST
             if side == "LONG":
                 if row["l"] <= sl:
                     result = -1
@@ -204,7 +206,7 @@ def backtest(df):
                 if row["h"] >= sl:
                     result = -1
                     break
-                if row["l"] >= tp:
+                if row["l"] <= tp:
                     result = 1
                     break
 
@@ -222,7 +224,7 @@ def backtest(df):
 
         trades.append(result > 0)
 
-        i += 1
+        i += 2
 
     return trades, curve
 
@@ -230,7 +232,7 @@ def backtest(df):
 # =========================
 # RUN
 # =========================
-print("===== DYDX V3.1 FIXED REPORT =====")
+print("===== DYDX V4 INSTITUTIONAL REPORT =====")
 
 df = fetch_data(PAIR, TIMEFRAME)
 
