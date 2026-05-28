@@ -1,6 +1,8 @@
 import requests
 import pandas as pd
 from datetime import datetime
+import json
+import os
 
 # ==========================
 # TELEGRAM AYARLARI
@@ -20,10 +22,29 @@ TIMEFRAMES = {
 
 LIMIT = 200
 ZIGZAG_LEN = 9
+CACHE_FILE = "sent_signals.json"
 
 
 # ==========================
-# TELEGRAM MESAJ
+# CACHE YUKLE
+# ==========================
+def load_sent_signals():
+
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, "r") as f:
+            return json.load(f)
+
+    return {}
+
+
+def save_sent_signals(data):
+
+    with open(CACHE_FILE, "w") as f:
+        json.dump(data, f)
+
+
+# ==========================
+# TELEGRAM
 # ==========================
 def send_telegram_message(message):
 
@@ -94,7 +115,7 @@ def get_candles(symbol, timeframe):
 
 
 # ==========================
-# BASIT MSB ANALIZI
+# BASIT MSB
 # ==========================
 def detect_msb(df):
 
@@ -119,9 +140,11 @@ def detect_msb(df):
 
 
 # ==========================
-# TARAYICI
+# TARAMA
 # ==========================
 def scan():
+
+    sent_signals = load_sent_signals()
 
     pairs = get_okx_pairs()
 
@@ -144,6 +167,15 @@ def scan():
 
                 if signal:
 
+                    candle_time = str(df["ts"].iloc[-1])
+
+                    signal_key = f"{pair}_{tf_name}_{signal}_{candle_time}"
+
+                    if signal_key in sent_signals:
+                        continue
+
+                    sent_signals[signal_key] = True
+
                     saat = datetime.now().strftime("%H:%M")
 
                     emoji = "🟢" if signal == "LONG" else "🔴"
@@ -162,6 +194,8 @@ def scan():
             except Exception as e:
                 print(f"{pair} hata: {e}")
                 continue
+
+    save_sent_signals(sent_signals)
 
 
 if __name__ == "__main__":
