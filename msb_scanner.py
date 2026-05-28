@@ -11,10 +11,10 @@ LIMIT = 500
 PIVOT = 6
 ATR_LEN = 14
 
-SL_ATR_MULT = 1.2
-RR = 2.2
+SCORE_THRESHOLD = 70
 
-DISPLACEMENT_ATR = 1.5   # 🔥 NEW: strong impulse threshold
+SL_ATR_MULT = 1.2
+RR = 2.0
 
 FEE = 0.0004
 SLIPPAGE = 0.0002
@@ -32,17 +32,17 @@ def fetch_data(symbol, timeframe):
     now = exchange.milliseconds()
     since = now - MONTHS_BACK * 30 * 24 * 60 * 60 * 1000
 
-    all_data = []
+    data = []
     tf_ms = 60 * 60 * 1000
 
     while since < now:
         batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=LIMIT)
         if not batch:
             break
-        all_data.extend(batch)
+        data.extend(batch)
         since = batch[-1][0] + tf_ms
 
-    df = pd.DataFrame(all_data, columns=["ts","o","h","l","c","v"])
+    df = pd.DataFrame(data, columns=["ts","o","h","l","c","v"])
     df.drop_duplicates("ts", inplace=True)
     df.reset_index(drop=True, inplace=True)
     return df
@@ -75,79 +75,90 @@ def swings(df):
 
     for i in range(PIVOT, len(df) - PIVOT):
         if highs[i] == np.max(highs[i-PIVOT:i+PIVOT+1]):
-            sh.append((i, highs[i]))
+            sh.append(highs[i])
         if lows[i] == np.min(lows[i-PIVOT:i+PIVOT+1]):
-            sl.append((i, lows[i]))
+            sl.append(lows[i])
 
     return sh, sl
 
 
 # =========================
-# DISPLACEMENT FILTER
+# DISPLACEMENT
 # =========================
 def displacement(df, i, atr_val):
     body = abs(df["c"].iloc[i] - df["o"].iloc[i])
-    return body > atr_val * DISPLACEMENT_ATR
+    return body > atr_val * 1.2
 
 
 # =========================
-# FVG DETECTION
+# FVG PROXIMITY
 # =========================
-def fvg_zone(df, i):
+def fvg_score(df, i):
     if i < 2:
-        return None
+        return 0
 
     c1 = df.iloc[i-2]
     c3 = df.iloc[i]
 
-    if c1["h"] < c3["l"]:
-        return ("bull", c1["h"], c3["l"])
+    if c1["h"] < c3["l"] or c1["l"] > c3["h"]:
+        return 15
 
-    if c1["l"] > c3["h"]:
-        return ("bear", c3["h"], c1["l"])
-
-    return None
+    return 0
 
 
 # =========================
-# SIGNAL ENGINE (V4 CORE)
+# SIGNAL SCORING ENGINE
 # =========================
-def signal(df):
+def score_signal(df):
     if len(df) < 120:
-        return None
+        return None, 0
 
     atr_val = atr(df, ATR_LEN).iloc[-1]
     if np.isnan(atr_val):
-        return None
+        return None, 0
 
     sh, sl = swings(df)
-
     if len(sh) < 3 or len(sl) < 3:
-        return None
+        return None, 0
 
-    last_sh = sh[-1][1]
-    last_sl = sl[-1][1]
+    last_sh = sh[-1]
+    last_sl = sl[-1]
 
     i = len(df) - 1
 
-    sweep_low = df["l"].iloc[i] < last_sl
-    sweep_high = df["h"].iloc[i] > last_sh
+    score_long = 0
+    score_short = 0
 
-    # 🔥 DISPLACEMENT CONFIRMATION
-    if not displacement(df, i, atr_val):
-        return None
+    # SWEEP
+    if df["l"].iloc[i] < last_sl:
+        score_long += 40
 
-    fvg = fvg_zone(df, i)
+    if df["h"].iloc[i] > last_sh:
+        score_short += 40
 
-    # LONG SETUP
-    if sweep_low and fvg and fvg[0] == "bull":
-        return ("LONG", fvg)
+    # DISPLACEMENT
+    if displacement(df, i, atr_val):
+        score_long += 25
+        score_short += 25
 
-    # SHORT SETUP
-    if sweep_high and fvg and fvg[0] == "bear":
-        return ("SHORT", fvg)
+    # MSS (simplified but realistic)
+    if df["c"].iloc[i] > last_sh:
+        score_long += 20
 
-    return None
+    if df["c"].iloc[i] < last_sl:
+        score_short += 20
+
+    # FVG bonus
+    score_long += fvg_score(df, i)
+    score_short += fvg_score(df, i)
+
+    if score_long >= SCORE_THRESHOLD:
+        return "LONG", score_long
+
+    if score_short >= SCORE_THRESHOLD:
+        return "SHORT", score_short
+
+    return None, 0
 
 
 # =========================
@@ -167,13 +178,11 @@ def backtest(df):
     while i < len(df) - future_bars:
 
         sub = df.iloc[:i]
-        sig = signal(sub)
+        sig, score = score_signal(sub)
 
         if sig is None:
             i += 1
             continue
-
-        side, fvg = sig
 
         atr_val = sub["atr"].iloc[-1]
         entry_idx = i + 1
@@ -182,7 +191,7 @@ def backtest(df):
 
         sl_dist = atr_val * SL_ATR_MULT
 
-        if side == "LONG":
+        if sig == "LONG":
             sl = entry - sl_dist
             tp = entry + sl_dist * RR
         else:
@@ -194,8 +203,7 @@ def backtest(df):
         result = None
 
         for _, row in future.iterrows():
-
-            if side == "LONG":
+            if sig == "LONG":
                 if row["l"] <= sl:
                     result = -1
                     break
@@ -224,7 +232,7 @@ def backtest(df):
 
         trades.append(result > 0)
 
-        i += 2
+        i += 1
 
     return trades, curve
 
@@ -232,7 +240,7 @@ def backtest(df):
 # =========================
 # RUN
 # =========================
-print("===== DYDX V4 INSTITUTIONAL REPORT =====")
+print("===== DYDX V5 SCORING REPORT =====")
 
 df = fetch_data(PAIR, TIMEFRAME)
 
