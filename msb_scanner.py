@@ -8,14 +8,9 @@ TIMEFRAME = "1h"
 
 MONTHS_BACK = 12
 
-PIVOT = 8
-LIMIT = 500
-
 SL_PCT = 0.01
-RR = 1.4
+RR = 1.8
 FUTURE_BARS = 12
-
-MIN_SWEEP_PCT = 0.003
 
 exchange = ccxt.okx({
     "enableRateLimit": True,
@@ -30,118 +25,87 @@ def fetch_data(symbol, timeframe):
     now = exchange.milliseconds()
     since = now - MONTHS_BACK * 30 * 24 * 60 * 60 * 1000
 
-    tf_ms = 60 * 60 * 1000
     candles = []
 
     while since < now:
-        batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=LIMIT)
-
+        batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=500)
         if not batch:
             break
 
         candles.extend(batch)
-
-        last = batch[-1][0]
-
-        if last <= since:
-            break
-
-        since = last + tf_ms
+        since = batch[-1][0] + 60 * 60 * 1000
 
     df = pd.DataFrame(candles, columns=["ts","o","h","l","c","v"])
     df.drop_duplicates(subset=["ts"], inplace=True)
     df.reset_index(drop=True, inplace=True)
-
     return df
 
 
 # -------------------------
-# SESSION FILTER (KEEP)
+# LIQUIDITY SWEEP
 # -------------------------
-def is_trading_session(ts):
-    dt = datetime.datetime.utcfromtimestamp(ts / 1000)
-    return 12 <= dt.hour <= 20
-
-
-# -------------------------
-# CLEAN SWING (IMPORTANT FIX)
-# -------------------------
-def get_swings(df):
-    highs = df["h"].values
-    lows = df["l"].values
-
-    swing_highs = []
-    swing_lows = []
-
-    for i in range(PIVOT, len(df) - PIVOT):
-
-        window_high = highs[i-PIVOT:i+PIVOT+1]
-        window_low = lows[i-PIVOT:i+PIVOT+1]
-
-        # REAL swing (not micro noise)
-        if highs[i] == np.max(window_high):
-            swing_highs.append(highs[i])
-
-        if lows[i] == np.min(window_low):
-            swing_lows.append(lows[i])
-
-    return swing_highs, swing_lows
+def get_liquidity_levels(df, lookback=20):
+    highs = df["h"].rolling(lookback).max()
+    lows = df["l"].rolling(lookback).min()
+    return highs, lows
 
 
 # -------------------------
-# SIGNAL ENGINE (STABLE)
+# FVG DETECTION (SIMPLE)
+# -------------------------
+def has_fvg(df, i):
+    if i < 3:
+        return False
+
+    prev_high = df["h"].iloc[i-2]
+    next_low = df["l"].iloc[i]
+
+    return next_low > prev_high
+
+
+# -------------------------
+# SIGNAL ENGINE (PRO)
 # -------------------------
 def signal(df):
-    if len(df) < 150:
+    if len(df) < 100:
         return None
 
-    # SESSION FILTER
-    if not is_trading_session(df["ts"].iloc[-1]):
-        return None
+    highs, lows = get_liquidity_levels(df)
 
-    swing_highs, swing_lows = get_swings(df)
+    i = len(df) - 1
 
-    if len(swing_highs) < 3 or len(swing_lows) < 3:
-        return None
+    h = df["h"].iloc[i]
+    l = df["l"].iloc[i]
+    c = df["c"].iloc[i]
 
-    last_high = swing_highs[-1]
-    prev_high = swing_highs[-2]
-
-    last_low = swing_lows[-1]
-    prev_low = swing_lows[-2]
-
-    h = df["h"].iloc[-1]
-    l = df["l"].iloc[-1]
-    c = df["c"].iloc[-1]
+    liquidity_high = highs.iloc[i-1]
+    liquidity_low = lows.iloc[i-1]
 
     # -------------------------
-    # SWEEP (UNCHANGED BUT CLEAN)
+    # SWEEP
     # -------------------------
-    sweep_high = (
-        h > last_high and
-        c < last_high and
-        ((h - last_high) / last_high) > MIN_SWEEP_PCT
-    )
-
-    sweep_low = (
-        l < last_low and
-        c > last_low and
-        ((last_low - l) / last_low) > MIN_SWEEP_PCT
-    )
+    sweep_high = h > liquidity_high and c < liquidity_high
+    sweep_low = l < liquidity_low and c > liquidity_low
 
     # -------------------------
-    # TREND (STABLE VERSION)
+    # DISPLACEMENT
     # -------------------------
-    trend_up = last_low > prev_low
-    trend_down = last_high < prev_high
+    body = abs(c - df["o"].iloc[i])
+    candle_range = h - l
+    displacement = candle_range > 0 and body / candle_range > 0.6
 
     # -------------------------
-    # FINAL SIGNAL
+    # FVG FILTER
     # -------------------------
-    if trend_up and sweep_low:
+    fvg = has_fvg(df, i)
+
+    # -------------------------
+    # FINAL LOGIC
+    # -------------------------
+    if sweep_low and displacement and fvg:
         return "LONG"
 
-    if trend_down and sweep_high:
+    if sweep_high and displacement and fvg:
         return "SHORT"
 
     return None
@@ -153,7 +117,7 @@ def signal(df):
 def backtest(df):
     trades = []
 
-    for i in range(150, len(df) - FUTURE_BARS):
+    for i in range(100, len(df) - FUTURE_BARS):
 
         sub = df.iloc[:i]
         side = signal(sub)
@@ -161,7 +125,7 @@ def backtest(df):
         if not side:
             continue
 
-        entry = df["o"].iloc[i + 1]
+        entry = df["o"].iloc[i+1]
 
         if side == "LONG":
             sl = entry * (1 - SL_PCT)
@@ -197,30 +161,20 @@ def backtest(df):
 # -------------------------
 # RUN
 # -------------------------
-print("===== DYDX V6.3 STABILIZED REPORT =====")
-print("Loading", PAIR, TIMEFRAME)
-
+print("===== DYDX V7 PRO REBUILD =====")
 df = fetch_data(PAIR, TIMEFRAME)
 
 if df.empty:
     print("NO DATA")
-
 else:
-    print("Candles:", len(df))
-
     results = backtest(df)
 
     if not results:
         print("NO SIGNAL")
-
     else:
         wins = sum(results)
         losses = len(results) - wins
 
         wr = round(wins / len(results) * 100, 2)
 
-        print(
-            f"{PAIR} | Trades:{len(results)} "
-            f"| Win:{wins} Loss:{losses} "
-            f"| WR:{wr}%"
-        )
+        print(f"{PAIR} | Trades:{len(results)} | Win:{wins} Loss:{losses} | WR:{wr}%")
