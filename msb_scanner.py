@@ -16,7 +16,7 @@ OB_LOOKBACK = 20
 SL_PCT = 0.01
 RR = 1.2
 
-PAIR = "DYDX/USDT:USDT"
+PAIR = "BTC/USDT:USDT"
 
 ex = ccxt.okx({
     "enableRateLimit": True,
