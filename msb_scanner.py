@@ -10,7 +10,7 @@ PIVOT = 8
 LIMIT = 500
 
 SL_PCT = 0.01
-RR = 1.5
+RR = 1.4
 FUTURE_BARS = 12
 
 MIN_SWEEP_PCT = 0.003
@@ -48,7 +48,7 @@ def fetch_data(symbol, timeframe):
 
 
 # -------------------------
-# SWING STRUCTURE
+# SWINGS
 # -------------------------
 def get_swings(df):
     highs = df["h"].values
@@ -59,16 +59,16 @@ def get_swings(df):
 
     for i in range(PIVOT, len(df) - PIVOT):
         if highs[i] >= np.max(highs[i-PIVOT:i+PIVOT+1]):
-            swing_highs.append((i, highs[i]))
+            swing_highs.append(highs[i])
 
         if lows[i] <= np.min(lows[i-PIVOT:i+PIVOT+1]):
-            swing_lows.append((i, lows[i]))
+            swing_lows.append(lows[i])
 
     return swing_highs, swing_lows
 
 
 # -------------------------
-# SIGNAL ENGINE (V7)
+# SIGNAL ENGINE (FIXED)
 # -------------------------
 def signal(df):
     if len(df) < 120:
@@ -79,19 +79,18 @@ def signal(df):
     if len(swing_highs) < 3 or len(swing_lows) < 3:
         return None
 
-    last_high = swing_highs[-1][1]
-    prev_high = swing_highs[-2][1]
+    last_high = swing_highs[-1]
+    prev_high = swing_highs[-2]
 
-    last_low = swing_lows[-1][1]
-    prev_low = swing_lows[-2][1]
+    last_low = swing_lows[-1]
+    prev_low = swing_lows[-2]
 
-    c = df["c"].iloc[-1]
     h = df["h"].iloc[-1]
     l = df["l"].iloc[-1]
-    o = df["o"].iloc[-1]
+    c = df["c"].iloc[-1]
 
     # -------------------------
-    # REAL SWEEP LOGIC
+    # REAL SWEEP (FIXED)
     # -------------------------
     sweep_high = (
         h > last_high and
@@ -106,22 +105,18 @@ def signal(df):
     )
 
     # -------------------------
-    # STRUCTURE TREND (BOS STYLE)
+    # CLEAN TREND (NO BOS, NO CONFUSION)
     # -------------------------
-    trend_up = (last_low > prev_low)
-    trend_down = (last_high < prev_high)
-
-    # BOS confirmation (simple displacement idea)
-    bos_up = c > last_high
-    bos_down = c < last_low
+    trend_up = last_low > prev_low
+    trend_down = last_high < prev_high
 
     # -------------------------
-    # FINAL SIGNALS
+    # ENTRY LOGIC (PURE REVERSAL)
     # -------------------------
-    if trend_up and sweep_low and bos_up:
+    if trend_up and sweep_low:
         return "LONG"
 
-    if trend_down and sweep_high and bos_down:
+    if trend_down and sweep_high:
         return "SHORT"
 
     return None
@@ -141,7 +136,7 @@ def backtest(df):
         if not side:
             continue
 
-        entry = df["o"].iloc[i + 1]  # NEXT CANDLE OPEN
+        entry = df["o"].iloc[i + 1]
 
         if side == "LONG":
             sl = entry * (1 - SL_PCT)
@@ -179,7 +174,7 @@ def backtest(df):
 # -------------------------
 # RUN
 # -------------------------
-print("===== DYDX V7 REPORT =====")
+print("===== DYDX V6.1 FIXED REPORT =====")
 print("Loading", PAIR, TIMEFRAME)
 
 df = fetch_data(PAIR, TIMEFRAME)
