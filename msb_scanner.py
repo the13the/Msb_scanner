@@ -1,14 +1,24 @@
+```python
 import ccxt
 import pandas as pd
 import numpy as np
+import time
 
 # ==========================
 # CONFIG
 # ==========================
+PAIRS = [
+    "BTC/USDT:USDT",
+    "ETH/USDT:USDT",
+    "DYDX/USDT:USDT"
+]
+
 TIMEFRAMES = {
-    "15m": 17280,   # ~6 ay
-    "1h": 4320      # ~6 ay
+    "15m": 15 * 60 * 1000,
+    "1h": 60 * 60 * 1000
 }
+
+MONTHS_BACK = 6
 
 PIVOT = 5
 OB_LOOKBACK = 20
@@ -16,11 +26,7 @@ OB_LOOKBACK = 20
 SL_PCT = 0.01
 RR = 1.2
 
-PAIRS = [
-    "BTC/USDT:USDT",
-    "ETH/USDT:USDT",
-    "DYDX/USDT:USDT"
-]
+BATCH_LIMIT = 100
 
 ex = ccxt.okx({
     "enableRateLimit": True,
@@ -29,28 +35,64 @@ ex = ccxt.okx({
 
 
 # ==========================
-# DATA
+# FETCH REAL HISTORY
 # ==========================
-def fetch(symbol, tf, limit):
-    try:
-        data = ex.fetch_ohlcv(symbol, tf, limit=limit)
+def fetch_real_history(symbol, tf):
 
-        df = pd.DataFrame(
-            data,
-            columns=["ts", "o", "h", "l", "c", "v"]
-        )
+    now_ms = ex.milliseconds()
 
-        return df
+    months_ms = MONTHS_BACK * 30 * 24 * 60 * 60 * 1000
+    since = now_ms - months_ms
 
-    except Exception as e:
-        print("fetch error:", symbol, tf, e)
+    all_data = []
+
+    while since < now_ms:
+
+        try:
+            batch = ex.fetch_ohlcv(
+                symbol,
+                timeframe=tf,
+                since=since,
+                limit=BATCH_LIMIT
+            )
+
+            if not batch:
+                break
+
+            all_data.extend(batch)
+
+            last_ts = batch[-1][0]
+
+            if last_ts <= since:
+                break
+
+            since = last_ts + TIMEFRAMES[tf]
+
+            time.sleep(ex.rateLimit / 1000)
+
+        except Exception as e:
+            print("fetch error:", symbol, tf, e)
+            break
+
+    if not all_data:
         return pd.DataFrame()
+
+    df = pd.DataFrame(
+        all_data,
+        columns=["ts", "o", "h", "l", "c", "v"]
+    )
+
+    df = df.drop_duplicates(subset=["ts"])
+    df = df.reset_index(drop=True)
+
+    return df
 
 
 # ==========================
 # SWINGS
 # ==========================
 def swings(df):
+
     h = df["h"].values
     l = df["l"].values
 
@@ -59,10 +101,10 @@ def swings(df):
 
     for i in range(PIVOT, len(df) - PIVOT):
 
-        if h[i] == np.max(h[i - PIVOT:i + PIVOT + 1]):
+        if h[i] == np.max(h[i-PIVOT:i+PIVOT+1]):
             sh.append((i, h[i]))
 
-        if l[i] == np.min(l[i - PIVOT:i + PIVOT + 1]):
+        if l[i] == np.min(l[i-PIVOT:i+PIVOT+1]):
             sl.append((i, l[i]))
 
     return sh, sl
@@ -93,8 +135,8 @@ def liquidity(close, sh, sl):
     if len(sh) < 2 or len(sl) < 2:
         return False, False
 
-    sweep_high = close >= max([x[1] for x in sh[-2:]])
-    sweep_low = close <= min([x[1] for x in sl[-2:]])
+    sweep_high = close >= max(x[1] for x in sh[-2:])
+    sweep_low = close <= min(x[1] for x in sl[-2:])
 
     return sweep_high, sweep_low
 
@@ -142,12 +184,12 @@ def signal(sub):
 
     sweep_high, sweep_low = liquidity(close, sh, sl)
 
-    ob = order_block(sub, len(sub) - 2)
+    ob = order_block(sub, len(sub)-2)
 
     if ob is None:
         return None
 
-    ob_high, ob_low = ob
+    ob_high, _ = ob
 
     risk = close * SL_PCT
     reward = abs(ob_high - close)
@@ -169,11 +211,13 @@ def signal(sub):
 # ==========================
 # BACKTEST
 # ==========================
-def backtest(df):
+def backtest(df, tf):
 
     trades = []
 
-    for i in range(80, len(df) - 24):
+    future_bars = 24 if tf == "15m" else 12
+
+    for i in range(80, len(df) - future_bars):
 
         sub = df.iloc[:i]
 
@@ -191,7 +235,7 @@ def backtest(df):
             tp = entry * (1 - SL_PCT * RR)
             sl = entry * (1 + SL_PCT)
 
-        future = df.iloc[i:i + 24]
+        future = df.iloc[i:i+future_bars]
 
         result = False
 
@@ -225,21 +269,25 @@ def backtest(df):
 # ==========================
 def run():
 
-    print("===== 6 MONTH PERFORMANCE REPORT =====")
+    print("===== REAL 6 MONTH PERFORMANCE REPORT =====")
 
-    for tf, limit in TIMEFRAMES.items():
+    for tf in TIMEFRAMES:
 
         print(f"\n===== {tf.upper()} =====")
 
         for pair in PAIRS:
 
-            df = fetch(pair, tf, limit)
+            print(f"Loading {pair} {tf}...")
+
+            df = fetch_real_history(pair, tf)
 
             if df.empty:
                 print(pair, "DATA YOK")
                 continue
 
-            results = backtest(df)
+            print("Candles:", len(df))
+
+            results = backtest(df, tf)
 
             if len(results) == 0:
                 print(pair, "NO SIGNAL")
@@ -258,3 +306,4 @@ def run():
 
 if __name__ == "__main__":
     run()
+```
