@@ -9,8 +9,8 @@ SYMBOL = "BTC/USDT:USDT"
 TIMEFRAME = "1h"
 
 LEVERAGE = 20
-RISK_PER_TRADE_USD = 10
-MAX_POSITION_USD = 100
+RISK_PER_TRADE_USD = 2
+MAX_POSITION_USD = 20
 RR = 1.8
 
 exchange = ccxt.okx({
@@ -57,47 +57,6 @@ def atr(df, period=14):
     ).max(axis=1)
 
     return tr.rolling(period).mean()
-
-
-def trend(df):
-
-    ma50 = df["c"].rolling(50).mean()
-    ma200 = df["c"].rolling(200).mean()
-
-    if ma50.iloc[-1] > ma200.iloc[-1]:
-        return "LONG"
-
-    return "SHORT"
-
-
-def signal(df):
-
-    if len(df) < 200:
-        return None
-
-    direction = trend(df)
-
-    highs = df["h"].rolling(20).max()
-    lows = df["l"].rolling(20).min()
-
-    i = len(df) - 1
-
-    c = df["c"].iloc[i]
-    h = df["h"].iloc[i]
-    l = df["l"].iloc[i]
-
-    last_high = highs.iloc[i - 1]
-    last_low = lows.iloc[i - 1]
-
-    if direction == "LONG":
-        if c > last_high and l <= last_high:
-            return "LONG"
-
-    if direction == "SHORT":
-        if c < last_low and h >= last_low:
-            return "SHORT"
-
-    return None
 
 
 def smart_stop(df, side):
@@ -334,71 +293,51 @@ try:
     print("===== BTC BOT START =====")
 
     df = fetch()
-
     price = df["c"].iloc[-1]
-    sig = signal(df)
+
+    # TEST MODE
+    sig = "LONG"
+
+    print("TEST MODE ACTIVE")
+
     pos = get_position()
 
     print("Signal:", sig)
     print("Position:", pos)
 
-    if sig is not None:
+    sl = smart_stop(df, sig)
 
-        sl = smart_stop(df, sig)
+    tp = smart_tp(
+        price,
+        sl,
+        sig
+    )
 
-        tp = smart_tp(
-            price,
-            sl,
-            sig
-        )
+    qty = position_size(
+        price,
+        sl
+    )
 
-        qty = position_size(
-            price,
-            sl
-        )
+    print("SL:", round(sl, 2))
+    print("TP:", round(tp, 2))
+    print("Qty:", qty)
 
-        print("SL:", round(sl, 2))
-        print("TP:", round(tp, 2))
-        print("Qty:", qty)
+    if qty > 0:
 
-        if qty > 0:
+        if pos is None:
 
-            if pos is not None:
+            open_position(
+                sig,
+                qty,
+                sl,
+                tp
+            )
 
-                if pos["side"] != sig:
+        else:
 
-                    print(
-                        "FLIP:",
-                        pos["side"],
-                        "->",
-                        sig
-                    )
-
-                    close_position(pos)
-
-                    time.sleep(2)
-
-                    open_position(
-                        sig,
-                        qty,
-                        sl,
-                        tp
-                    )
-
-                else:
-
-                    print(
-                        "Same position open"
-                    )
-
-            else:
-
-                open_position(
-                    sig,
-                    qty,
-                    sl,
-                    tp
-                )
+            print(
+                "Position already open"
+            )
 
     print("===== DONE =====")
 
