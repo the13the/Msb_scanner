@@ -1,234 +1,270 @@
 import ccxt
 import pandas as pd
 import numpy as np
-import os
-from datetime import datetime
+import time
 
-# =========================
+# ==========================
 # CONFIG
-# =========================
-TIMEFRAME = "1h"
-DAYS_BACK = 7
-CANDLES = DAYS_BACK * 24
+# ==========================
+TIMEFRAMES = {
+    "15m": 2880,  # 30 gün
+    "1h": 720
+}
 
-TP_RR = 2.0      # 1R risk → 2R reward
-SL_PCT = 0.01    # %1 risk
+DAYS_FORWARD = 24
+PIVOT = 5
+OB_LOOKBACK = 20
 
-PIVOT_LEN = 5
-OB_LOOKBACK = 25
+SL_PCT = 0.01
+RR = 1.2
 
 PAIRS = [
-    "BTC/USDT:USDT","ETH/USDT:USDT","SOL/USDT:USDT",
-    "XRP/USDT:USDT","ADA/USDT:USDT","AVAX/USDT:USDT"
+    "BTC/USDT:USDT","ETH/USDT:USDT","SOL/USDT:USDT","XRP/USDT:USDT","ADA/USDT:USDT",
+    "AVAX/USDT:USDT","LINK/USDT:USDT","DOT/USDT:USDT","MATIC/USDT:USDT","TRX/USDT:USDT",
+    "LTC/USDT:USDT","ATOM/USDT:USDT","XLM/USDT:USDT","NEAR/USDT:USDT","APT/USDT:USDT",
+    "SUI/USDT:USDT","TON/USDT:USDT","ARB/USDT:USDT","OP/USDT:USDT","DOGE/USDT:USDT",
+    "SHIB/USDT:USDT","PEPE/USDT:USDT","UNI/USDT:USDT","AAVE/USDT:USDT","INJ/USDT:USDT",
+    "ICP/USDT:USDT","FIL/USDT:USDT","HBAR/USDT:USDT","STX/USDT:USDT","IMX/USDT:USDT",
+    "VET/USDT:USDT","RUNE/USDT:USDT","ALGO/USDT:USDT","FTM/USDT:USDT","SAND/USDT:USDT",
+    "MANA/USDT:USDT","GALA/USDT:USDT","DYDX/USDT:USDT","CRV/USDT:USDT","CHZ/USDT:USDT",
+    "GMT/USDT:USDT","MINA/USDT:USDT","COMP/USDT:USDT","SNX/USDT:USDT","JUP/USDT:USDT",
+    "PYTH/USDT:USDT","STRK/USDT:USDT","ENS/USDT:USDT","BLUR/USDT:USDT","ORDI/USDT:USDT"
 ]
 
-ex = ccxt.okx({"options": {"defaultType": "swap"}})
+ex = ccxt.okx({
+    "enableRateLimit": True,
+    "options": {"defaultType": "swap"}
+})
 
-# =========================
+
+# ==========================
 # DATA
-# =========================
-def fetch(symbol):
+# ==========================
+def fetch(symbol, tf, limit):
     try:
-        df = ex.fetch_ohlcv(symbol, TIMEFRAME, limit=CANDLES)
-        return pd.DataFrame(df, columns=["t","o","h","l","c","v"])
-    except:
+        data = ex.fetch_ohlcv(symbol, tf, limit=limit)
+        df = pd.DataFrame(
+            data,
+            columns=["ts","o","h","l","c","v"]
+        )
+        return df
+    except Exception as e:
+        print("fetch error:", symbol, tf, e)
         return pd.DataFrame()
 
-# =========================
-# SWINGS (LIQUIDITY LEVELS)
-# =========================
+
+# ==========================
+# SWINGS
+# ==========================
 def swings(df):
     h = df["h"].values
     l = df["l"].values
 
-    sh, sl = [], []
+    sh = []
+    sl = []
 
-    for i in range(PIVOT_LEN, len(df)-PIVOT_LEN):
-        if h[i] == np.max(h[i-PIVOT_LEN:i+PIVOT_LEN]):
-            sh.append(h[i])
-        if l[i] == np.min(l[i-PIVOT_LEN:i+PIVOT_LEN]):
-            sl.append(l[i])
+    for i in range(PIVOT, len(df)-PIVOT):
+        if h[i] == np.max(h[i-PIVOT:i+PIVOT+1]):
+            sh.append((i, h[i]))
+
+        if l[i] == np.min(l[i-PIVOT:i+PIVOT+1]):
+            sl.append((i, l[i]))
 
     return sh, sl
 
-# =========================
-# LIQUIDITY SWEEP (V3 CORE)
-# =========================
-def liquidity_sweep(df, sh, sl):
-    if len(sh) < 3 or len(sl) < 3:
-        return False, False
 
-    price = df["c"].iloc[-1]
-
-    sweep_high = price > np.max(sh[-3:])
-    sweep_low  = price < np.min(sl[-3:])
-
-    return sweep_high, sweep_low
-
-# =========================
-# CHOCH (TREND SHIFT)
-# =========================
-def choch(sh, sl, close):
+# ==========================
+# V3.1 BALANCE
+# ==========================
+def choch(sh, sl):
     if len(sh) < 2 or len(sl) < 2:
         return None
 
-    if close > sh[-2] and close < sh[-1]:
-        return "DOWN_SHIFT"
+    if sh[-1][1] < sh[-2][1]:
+        return "DOWN"
 
-    if close < sl[-2] and close > sl[-1]:
-        return "UP_SHIFT"
-
-    return None
-
-# =========================
-# ORDER BLOCK (IMPROVED)
-# =========================
-def order_block(df, i):
-    start = max(0, i - OB_LOOKBACK)
-
-    for j in range(i-1, start, -1):
-        body = abs(df["c"].iloc[j] - df["o"].iloc[j])
-
-        # impulse sonrası candle seçimi (daha kaliteli OB)
-        if body > (df["h"].iloc[j] - df["l"].iloc[j]) * 0.6:
-            return (df["h"].iloc[j], df["l"].iloc[j])
+    if sl[-1][1] > sl[-2][1]:
+        return "UP"
 
     return None
 
-# =========================
-# RR FILTER
-# =========================
-def rr_check(entry, ob):
-    ob_h, ob_l = ob
 
-    risk = entry * SL_PCT
-    reward = abs(entry - ob_h)
+def liquidity(close, sh, sl):
+    if len(sh) < 2 or len(sl) < 2:
+        return False, False
 
-    rr = reward / risk if risk != 0 else 0
+    sweep_high = close >= max([x[1] for x in sh[-2:]])
+    sweep_low = close <= min([x[1] for x in sl[-2:]])
 
-    return rr >= TP_RR
+    return sweep_high, sweep_low
 
-# =========================
-# SIGNAL ENGINE (V3)
-# =========================
-def signal(df):
-    if len(df) < 100:
-        return None
 
-    sh, sl = swings(df)
-    sweep_high, sweep_low = liquidity_sweep(df, sh, sl)
-    trend = choch(sh, sl, df["c"].iloc[-1])
-    ob = order_block(df, len(df)-1)
+def order_block(df, idx):
+    start = max(0, idx - OB_LOOKBACK)
 
-    if not ob or not trend:
-        return None
+    for i in range(idx, start, -1):
+        rng = df["h"].iloc[i] - df["l"].iloc[i]
+        body = abs(df["c"].iloc[i] - df["o"].iloc[i])
 
-    entry = df["c"].iloc[-1]
+        if rng == 0:
+            continue
 
-    if not rr_check(entry, ob):
-        return None
-
-    ob_h, ob_l = ob
-
-    top = min(ob_h, entry)
-    bot = max(ob_l, entry)
-
-    if top <= bot:
-        return None
-
-    # LONG
-    if trend == "UP_SHIFT" and sweep_low:
-        return "LONG", (top, bot)
-
-    # SHORT
-    if trend == "DOWN_SHIFT" and sweep_high:
-        return "SHORT", (top, bot)
+        if body / rng > 0.55:
+            return (
+                df["h"].iloc[i],
+                df["l"].iloc[i]
+            )
 
     return None
 
-# =========================
+
+def signal(sub):
+    sh, sl = swings(sub)
+
+    if len(sh) < 2 or len(sl) < 2:
+        return None
+
+    trend = choch(sh, sl)
+
+    if trend is None:
+        return None
+
+    close = sub["c"].iloc[-1]
+
+    sweep_high, sweep_low = liquidity(close, sh, sl)
+
+    ob = order_block(sub, len(sub)-2)
+
+    if ob is None:
+        return None
+
+    ob_high, ob_low = ob
+
+    risk = close * SL_PCT
+    reward = abs(ob_high - close)
+
+    rr = reward / risk if risk > 0 else 0
+
+    if rr < RR:
+        return None
+
+    if trend == "UP" and sweep_low:
+        return "LONG"
+
+    if trend == "DOWN" and sweep_high:
+        return "SHORT"
+
+    return None
+
+
+# ==========================
 # BACKTEST
-# =========================
+# ==========================
 def backtest(df):
     trades = []
 
-    for i in range(100, len(df)-24):
+    for i in range(80, len(df)-DAYS_FORWARD):
 
         sub = df.iloc[:i]
 
-        res = signal(sub)
-        if not res:
+        side = signal(sub)
+
+        if side is None:
             continue
 
-        direction, zone = res
         entry = sub["c"].iloc[-1]
 
-        tp = entry * (1 + TP_RR * SL_PCT) if direction == "LONG" else entry * (1 - TP_RR * SL_PCT)
-        sl = entry * (1 - SL_PCT) if direction == "LONG" else entry * (1 + SL_PCT)
+        if side == "LONG":
+            tp = entry * (1 + SL_PCT * RR)
+            sl = entry * (1 - SL_PCT)
+        else:
+            tp = entry * (1 - SL_PCT * RR)
+            sl = entry * (1 + SL_PCT)
 
-        future = df.iloc[i:i+24]
+        future = df.iloc[i:i+DAYS_FORWARD]
 
-        win = False
+        result = False
 
-        for _, r in future.iterrows():
+        for _, row in future.iterrows():
 
-            if direction == "LONG":
-                if r["h"] >= tp:
-                    win = True
+            if side == "LONG":
+                if row["h"] >= tp:
+                    result = True
                     break
-                if r["l"] <= sl:
+                if row["l"] <= sl:
                     break
 
             else:
-                if r["l"] <= tp:
-                    win = True
+                if row["l"] <= tp:
+                    result = True
                     break
-                if r["h"] >= sl:
+                if row["h"] >= sl:
                     break
 
-        trades.append(win)
+        trades.append(result)
 
     return trades
 
-# =========================
-# RUN REPORT
-# =========================
+
+# ==========================
+# RUN
+# ==========================
 def run():
-    print("===== V3 PERFORMANCE REPORT =====")
 
-    total_trades = 0
-    wins = 0
+    print("===== V3.1 PERFORMANCE REPORT =====")
 
-    for pair in PAIRS:
+    for tf, limit in TIMEFRAMES.items():
 
-        df = fetch(pair)
-        if df.empty:
-            continue
+        print(f"\n===== {tf.upper()} =====")
 
-        results = backtest(df)
+        total_trades = 0
+        total_wins = 0
+        best_coin = None
+        best_wr = -1
 
-        if not results:
-            print(pair, "NO SIGNAL")
-            continue
+        for pair in PAIRS:
 
-        w = sum(results)
-        l = len(results) - w
+            df = fetch(pair, tf, limit)
 
-        winrate = (w / len(results)) * 100
+            if df.empty:
+                continue
 
-        print(f"\n{pair}")
-        print("Trades:", len(results))
-        print("Win:", w, "Loss:", l)
-        print("Winrate:", round(winrate, 2), "%")
+            results = backtest(df)
 
-        total_trades += len(results)
-        wins += w
+            if len(results) == 0:
+                print(pair, "NO SIGNAL")
+                continue
 
-    overall = (wins / total_trades) * 100 if total_trades > 0 else 0
+            wins = sum(results)
+            losses = len(results) - wins
+            wr = round((wins / len(results))*100, 2)
 
-    print("\n===== SUMMARY =====")
-    print("Total Trades:", total_trades)
-    print("Winrate:", round(overall, 2), "%")
+            print(
+                f"{pair} | Trades:{len(results)} "
+                f"| Win:{wins} Loss:{losses} "
+                f"| WR:{wr}%"
+            )
+
+            total_trades += len(results)
+            total_wins += wins
+
+            if wr > best_wr:
+                best_wr = wr
+                best_coin = pair
+
+            time.sleep(0.08)
+
+        overall = (
+            round((total_wins / total_trades)*100, 2)
+            if total_trades > 0 else 0
+        )
+
+        print("\nSUMMARY")
+        print("Trades:", total_trades)
+        print("Winrate:", overall, "%")
+        print("Best Coin:", best_coin)
+        print("Best WR:", best_wr)
+
 
 if __name__ == "__main__":
     run()
