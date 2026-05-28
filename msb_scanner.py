@@ -7,13 +7,13 @@ PAIR = "DYDX/USDT:USDT"
 TIMEFRAME = "1h"
 
 MONTHS_BACK = 3
-PIVOT = 8
+PIVOT = 6
 
 SL_PCT = 0.01
 RR = 1.3
 LIMIT = 500
 
-MIN_SWEEP_PCT = 0.004
+MIN_SWEEP_PCT = 0.002
 
 exchange = ccxt.okx({
     "enableRateLimit": True,
