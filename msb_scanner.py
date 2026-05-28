@@ -2,11 +2,7 @@ import ccxt
 import pandas as pd
 import numpy as np
 
-PAIRS = [
-    "BTC/USDT:USDT",
-    "ETH/USDT:USDT",
-    "DYDX/USDT:USDT"
-]
+PAIR = "DYDX/USDT:USDT"
 
 TIMEFRAMES = ["15m", "1h"]
 
@@ -14,11 +10,10 @@ MONTHS_BACK = 3
 PIVOT = 5
 
 SL_PCT = 0.01
-RR = 1.5
+RR = 1.3
 LIMIT = 500
 
-EMA_PERIOD = 200
-MIN_SWEEP_PCT = 0.002
+MIN_SWEEP_PCT = 0.0008
 
 exchange = ccxt.okx({
     "enableRateLimit": True,
@@ -111,25 +106,17 @@ def fetch_data(symbol, timeframe):
         inplace=True
     )
 
-    df["ema200"] = (
-        df["c"]
-        .ewm(span=EMA_PERIOD)
-        .mean()
-    )
-
     return df
 
 
 def signal(df):
 
-    if len(df) < EMA_PERIOD:
+    if len(df) < 50:
         return None
 
     highs = df["h"].values
     lows = df["l"].values
-
     close = df["c"].iloc[-1]
-    ema200 = df["ema200"].iloc[-1]
 
     swing_highs = []
     swing_lows = []
@@ -177,16 +164,20 @@ def signal(df):
     sweep_high = (
         close > last_high
         and
-        abs(close - last_high)
-        / last_high
+        (
+            abs(close - last_high)
+            / last_high
+        )
         > MIN_SWEEP_PCT
     )
 
     sweep_low = (
         close < last_low
         and
-        abs(close - last_low)
-        / last_low
+        (
+            abs(close - last_low)
+            / last_low
+        )
         > MIN_SWEEP_PCT
     )
 
@@ -202,18 +193,10 @@ def signal(df):
         swing_highs[-2]
     )
 
-    if (
-        trend_up
-        and sweep_low
-        and close > ema200
-    ):
+    if trend_up and sweep_low:
         return "LONG"
 
-    if (
-        trend_down
-        and sweep_high
-        and close < ema200
-    ):
+    if trend_down and sweep_high:
         return "SHORT"
 
     return None
@@ -230,7 +213,7 @@ def backtest(df, tf):
     )
 
     for i in range(
-        EMA_PERIOD,
+        50,
         len(df) - future_bars
     ):
 
@@ -298,77 +281,58 @@ def backtest(df, tf):
     return trades
 
 
-print(
-    "===== V4 PERFORMANCE REPORT ====="
-)
+print("===== DYDX V5 REPORT =====")
 
 for tf in TIMEFRAMES:
 
+    print(f"\n===== {tf.upper()} =====")
+
     print(
-        f"\n===== {tf.upper()} ====="
+        "Loading",
+        PAIR,
+        tf
     )
 
-    for pair in PAIRS:
+    df = fetch_data(
+        PAIR,
+        tf
+    )
 
-        print(
-            "Loading",
-            pair,
-            tf
-        )
+    if df.empty:
 
-        df = fetch_data(
-            pair,
-            tf
-        )
+        print("NO DATA")
+        continue
 
-        if df.empty:
+    print(
+        "Candles:",
+        len(df)
+    )
 
-            print(
-                pair,
-                "NO DATA"
-            )
+    results = backtest(
+        df,
+        tf
+    )
 
-            continue
+    if len(results) == 0:
 
-        print(
-            "Candles:",
-            len(df)
-        )
+        print("NO SIGNAL")
+        continue
 
-        results = backtest(
-            df,
-            tf
-        )
+    wins = sum(results)
+    losses = len(results) - wins
 
-        if len(results) == 0:
+    wr = round(
+        (
+            wins
+            / len(results)
+        ) * 100,
+        2
+    )
 
-            print(
-                pair,
-                "NO SIGNAL"
-            )
-
-            continue
-
-        wins = sum(results)
-
-        losses = (
-            len(results)
-            - wins
-        )
-
-        wr = round(
-            (
-                wins
-                / len(results)
-            )
-            * 100,
-            2
-        )
-
-        print(
-            f"{pair} "
-            f"| Trades:{len(results)} "
-            f"| Win:{wins} "
-            f"Loss:{losses} "
-            f"| WR:{wr}%"
-        )
+    print(
+        f"{PAIR} "
+        f"| Trades:{len(results)} "
+        f"| Win:{wins} "
+        f"Loss:{losses} "
+        f"| WR:{wr}%"
+    )
