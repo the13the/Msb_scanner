@@ -7,6 +7,8 @@ TIMEFRAME = "1h"
 
 MONTHS_BACK = 12
 
+INITIAL_BALANCE = 10000
+RISK_PER_TRADE = 0.01  # %1 risk
 SL_PCT = 0.008
 RR = 1.8
 FUTURE_BARS = 12
@@ -44,12 +46,9 @@ def fetch_data(symbol, timeframe):
 
 
 # -------------------------
-# TREND (HTF BIAS)
+# TREND
 # -------------------------
 def trend(df):
-    if len(df) < 200:
-        return None
-
     ma50 = df["c"].rolling(50).mean()
     ma200 = df["c"].rolling(200).mean()
 
@@ -57,23 +56,23 @@ def trend(df):
 
 
 # -------------------------
-# SWING LEVELS (STRUCTURE)
+# STRUCTURE
 # -------------------------
-def structure_levels(df):
+def levels(df):
     highs = df["h"].rolling(LOOKBACK).max()
     lows = df["l"].rolling(LOOKBACK).min()
     return highs, lows
 
 
 # -------------------------
-# SIGNAL ENGINE (CONTINUATION)
+# SIGNAL
 # -------------------------
 def signal(df):
     if len(df) < 200:
         return None
 
     tr = trend(df)
-    highs, lows = structure_levels(df)
+    highs, lows = levels(df)
 
     i = len(df) - 1
 
@@ -84,21 +83,12 @@ def signal(df):
     last_high = highs.iloc[i-1]
     last_low = lows.iloc[i-1]
 
-    # -------------------------
-    # BOS (BREAK OF STRUCTURE)
-    # -------------------------
     bos_up = c > last_high
     bos_down = c < last_low
 
-    # -------------------------
-    # RETEST LOGIC (ENTRY EDGE)
-    # -------------------------
-    retest_high = (l <= last_high) and (c > last_high)
-    retest_low = (h >= last_low) and (c < last_low)
+    retest_high = l <= last_high and c > last_high
+    retest_low = h >= last_low and c < last_low
 
-    # -------------------------
-    # FINAL LOGIC
-    # -------------------------
     if tr == "UP" and bos_up and retest_high:
         return "LONG"
 
@@ -109,10 +99,18 @@ def signal(df):
 
 
 # -------------------------
-# BACKTEST
+# PROP FIRM BACKTEST ENGINE
 # -------------------------
 def backtest(df):
-    trades = []
+    balance = INITIAL_BALANCE
+    equity_curve = [balance]
+
+    max_balance = balance
+    max_drawdown = 0
+
+    trades = 0
+    wins = 0
+    losses = 0
 
     for i in range(200, len(df) - FUTURE_BARS):
 
@@ -124,41 +122,66 @@ def backtest(df):
 
         entry = df["o"].iloc[i+1]
 
+        risk_amount = balance * RISK_PER_TRADE
+        sl_distance = entry * SL_PCT
+
+        position_size = risk_amount / sl_distance
+
         if side == "LONG":
-            sl = entry * (1 - SL_PCT)
-            tp = entry + (entry - sl) * RR
+            sl = entry - sl_distance
+            tp = entry + sl_distance * RR
         else:
-            sl = entry * (1 + SL_PCT)
-            tp = entry - (sl - entry) * RR
+            sl = entry + sl_distance
+            tp = entry - sl_distance * RR
 
         future = df.iloc[i+1:i+1+FUTURE_BARS]
 
-        result = False
+        result = None
 
         for _, row in future.iterrows():
 
             if side == "LONG":
                 if row["h"] >= tp:
-                    result = True
+                    result = "WIN"
                     break
                 if row["l"] <= sl:
+                    result = "LOSS"
                     break
             else:
-                if row["l"] >= tp:
-                    result = True
+                if row["l"] <= tp:
+                    result = "WIN"
                     break
-                if row["h"] <= sl:
+                if row["h"] >= sl:
+                    result = "LOSS"
                     break
 
-        trades.append(result)
+        if result == "WIN":
+            pnl = risk_amount * RR
+            balance += pnl
+            wins += 1
 
-    return trades
+        elif result == "LOSS":
+            pnl = -risk_amount
+            balance += pnl
+            losses += 1
+
+        else:
+            continue
+
+        trades += 1
+        equity_curve.append(balance)
+
+        max_balance = max(max_balance, balance)
+        drawdown = (max_balance - balance) / max_balance
+        max_drawdown = max(max_drawdown, drawdown)
+
+    return trades, wins, losses, balance, max_drawdown, equity_curve
 
 
 # -------------------------
 # RUN
 # -------------------------
-print("===== BTC V8 CONTINUATION ENGINE =====")
+print("===== BTC PROP FIRM ENGINE =====")
 
 df = fetch_data(PAIR, TIMEFRAME)
 
@@ -166,19 +189,18 @@ if df.empty:
     print("NO DATA")
 
 else:
-    results = backtest(df)
+    trades, wins, losses, final_balance, mdd, curve = backtest(df)
 
-    if not results:
+    if trades == 0:
         print("NO SIGNAL")
 
     else:
-        wins = sum(results)
-        losses = len(results) - wins
+        wr = round(wins / trades * 100, 2)
+        profit = round(final_balance - INITIAL_BALANCE, 2)
 
-        wr = round(wins / len(results) * 100, 2)
-
-        print(
-            f"{PAIR} | Trades:{len(results)} "
-            f"| Win:{wins} Loss:{losses} "
-            f"| WR:{wr}%"
-        )
+        print(f"Trades: {trades}")
+        print(f"Win: {wins} Loss: {losses}")
+        print(f"WR: {wr}%")
+        print(f"Final Balance: {final_balance}$")
+        print(f"Profit: {profit}$")
+        print(f"Max Drawdown: {round(mdd*100,2)}%")
