@@ -11,10 +11,14 @@ LIMIT = 500
 PIVOT = 6
 ATR_LEN = 14
 
-SCORE_THRESHOLD = 70
-
 SL_ATR_MULT = 1.2
-RR = 2.0
+RR = 2.2
+
+DISP_ATR = 1.5
+
+SWEEP_WINDOW = 5
+DISP_WINDOW = 5
+FVG_WINDOW = 5
 
 FEE = 0.0004
 SLIPPAGE = 0.0002
@@ -83,154 +87,198 @@ def swings(df):
 
 
 # =========================
-# DISPLACEMENT
+# DISPLACEMENT CHECK
 # =========================
-def displacement(df, i, atr_val):
-    body = abs(df["c"].iloc[i] - df["o"].iloc[i])
-    return body > atr_val * 1.2
+def displacement(candle, atr_val):
+    return abs(candle["c"] - candle["o"]) > atr_val * DISP_ATR
 
 
 # =========================
-# FVG PROXIMITY
+# FVG DETECTION
 # =========================
-def fvg_score(df, i):
+def detect_fvg(df, i):
     if i < 2:
-        return 0
+        return None
 
     c1 = df.iloc[i-2]
     c3 = df.iloc[i]
 
-    if c1["h"] < c3["l"] or c1["l"] > c3["h"]:
-        return 15
+    if c1["h"] < c3["l"]:
+        return "bull"
+    if c1["l"] > c3["h"]:
+        return "bear"
 
-    return 0
+    return None
 
 
 # =========================
-# SIGNAL SCORING ENGINE
+# STATE MACHINE
 # =========================
-def score_signal(df):
-    if len(df) < 120:
-        return None, 0
+def generate_events(df, i, atr_val, last_sh, last_sl):
 
-    atr_val = atr(df, ATR_LEN).iloc[-1]
-    if np.isnan(atr_val):
-        return None, 0
+    candle = df.iloc[i]
 
-    sh, sl = swings(df)
-    if len(sh) < 3 or len(sl) < 3:
-        return None, 0
+    sweep = None
+    disp = False
+    fvg = None
 
-    last_sh = sh[-1]
-    last_sl = sl[-1]
+    # 1. SWEEP
+    if candle["l"] < last_sl:
+        sweep = "LONG"
+    if candle["h"] > last_sh:
+        sweep = "SHORT"
 
-    i = len(df) - 1
+    # 2. DISPLACEMENT
+    if displacement(candle, atr_val):
+        disp = True
 
-    score_long = 0
-    score_short = 0
+    # 3. FVG
+    fvg = detect_fvg(df, i)
 
-    # SWEEP
-    if df["l"].iloc[i] < last_sl:
-        score_long += 40
-
-    if df["h"].iloc[i] > last_sh:
-        score_short += 40
-
-    # DISPLACEMENT
-    if displacement(df, i, atr_val):
-        score_long += 25
-        score_short += 25
-
-    # MSS (simplified but realistic)
-    if df["c"].iloc[i] > last_sh:
-        score_long += 20
-
-    if df["c"].iloc[i] < last_sl:
-        score_short += 20
-
-    # FVG bonus
-    score_long += fvg_score(df, i)
-    score_short += fvg_score(df, i)
-
-    if score_long >= SCORE_THRESHOLD:
-        return "LONG", score_long
-
-    if score_short >= SCORE_THRESHOLD:
-        return "SHORT", score_short
-
-    return None, 0
+    return sweep, disp, fvg
 
 
 # =========================
 # BACKTEST
 # =========================
 def backtest(df):
+
     df["atr"] = atr(df, ATR_LEN)
 
     trades = []
     equity = 1.0
     curve = [equity]
 
+    state = None
+    direction = None
+    setup_i = None
+
     future_bars = 12
+
+    sh, sl = swings(df)
 
     i = 120
 
     while i < len(df) - future_bars:
 
-        sub = df.iloc[:i]
-        sig, score = score_signal(sub)
-
-        if sig is None:
+        atr_val = df["atr"].iloc[i]
+        if np.isnan(atr_val):
             i += 1
             continue
 
-        atr_val = sub["atr"].iloc[-1]
-        entry_idx = i + 1
+        last_sh = sh[-1]
+        last_sl = sl[-1]
 
-        entry = df["o"].iloc[entry_idx]
+        candle = df.iloc[i]
 
-        sl_dist = atr_val * SL_ATR_MULT
+        sweep, disp, fvg = generate_events(df, i, atr_val, last_sh, last_sl)
 
-        if sig == "LONG":
-            sl = entry - sl_dist
-            tp = entry + sl_dist * RR
-        else:
-            sl = entry + sl_dist
-            tp = entry - sl_dist * RR
+        # =========================
+        # STATE 0 → WAIT SWEEP
+        # =========================
+        if state is None:
 
-        future = df.iloc[entry_idx:entry_idx+future_bars]
+            if sweep == "LONG":
+                state = "sweep_long"
+                direction = "LONG"
+                setup_i = i
 
-        result = None
+            elif sweep == "SHORT":
+                state = "sweep_short"
+                direction = "SHORT"
+                setup_i = i
 
-        for _, row in future.iterrows():
-            if sig == "LONG":
-                if row["l"] <= sl:
-                    result = -1
-                    break
-                if row["h"] >= tp:
-                    result = 1
-                    break
+            i += 1
+            continue
+
+        # =========================
+        # STATE 1 → WAIT DISPLACEMENT
+        # =========================
+        if state in ["sweep_long", "sweep_short"]:
+
+            if i - setup_i > SWEEP_WINDOW:
+                state = None
+                i += 1
+                continue
+
+            if disp:
+                state = "displacement"
+            i += 1
+            continue
+
+        # =========================
+        # STATE 2 → WAIT FVG
+        # =========================
+        if state == "displacement":
+
+            if i - setup_i > DISPLACEMENT_WINDOW:
+                state = None
+                i += 1
+                continue
+
+            if fvg is not None:
+                state = "ready"
+            i += 1
+            continue
+
+        # =========================
+        # STATE 3 → ENTRY (RETRACE)
+        # =========================
+        if state == "ready":
+
+            entry_idx = i + 1
+            if entry_idx >= len(df):
+                break
+
+            entry = df["o"].iloc[entry_idx]
+            atr_val = df["atr"].iloc[i]
+
+            sl_dist = atr_val * SL_ATR_MULT
+
+            if direction == "LONG":
+                sl = entry - sl_dist
+                tp = entry + sl_dist * RR
             else:
-                if row["h"] >= sl:
-                    result = -1
-                    break
-                if row["l"] <= tp:
-                    result = 1
-                    break
+                sl = entry + sl_dist
+                tp = entry - sl_dist * RR
 
-        if result is None:
-            i += 1
-            continue
+            future = df.iloc[entry_idx:entry_idx+future_bars]
 
-        r = result * (sl_dist / entry)
+            result = None
 
-        r -= FEE * 2
-        r -= SLIPPAGE
+            for _, row in future.iterrows():
 
-        equity *= (1 + r)
-        curve.append(equity)
+                if direction == "LONG":
+                    if row["l"] <= sl:
+                        result = -1
+                        break
+                    if row["h"] >= tp:
+                        result = 1
+                        break
+                else:
+                    if row["h"] >= sl:
+                        result = -1
+                        break
+                    if row["l"] <= tp:
+                        result = 1
+                        break
 
-        trades.append(result > 0)
+            if result is None:
+                state = None
+                i += 1
+                continue
+
+            r = result * (sl_dist / entry)
+
+            r -= FEE * 2
+            r -= SLIPPAGE
+
+            equity *= (1 + r)
+            curve.append(equity)
+
+            trades.append(result > 0)
+
+            state = None
 
         i += 1
 
@@ -240,7 +288,7 @@ def backtest(df):
 # =========================
 # RUN
 # =========================
-print("===== DYDX V5 SCORING REPORT =====")
+print("===== DYDX V6 STATE MACHINE REPORT =====")
 
 df = fetch_data(PAIR, TIMEFRAME)
 
