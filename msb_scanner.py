@@ -3,312 +3,327 @@ import pandas as pd
 import numpy as np
 
 PAIR = "DYDX/USDT:USDT"
+
 TIMEFRAME = "1h"
 
 MONTHS_BACK = 3
+PIVOT = 8
+
+SL_PCT = 0.01
+RR = 1.3
 LIMIT = 500
 
-PIVOT = 6
-ATR_LEN = 14
-
-SL_ATR_MULT = 1.2
-RR = 2.2
-
-DISPLACEMENT_WINDOW = 5
-FVG_WINDOW = 5
-
-DISP_ATR = 1.5
-
-FEE = 0.0004
-SLIPPAGE = 0.0002
+MIN_SWEEP_PCT = 0.004
 
 exchange = ccxt.okx({
     "enableRateLimit": True,
-    "options": {"defaultType": "swap"}
+    "options": {
+        "defaultType": "swap"
+    }
 })
 
 
-# =========================
-# DATA
-# =========================
 def fetch_data(symbol, timeframe):
-    now = exchange.milliseconds()
-    since = now - MONTHS_BACK * 30 * 24 * 60 * 60 * 1000
 
-    data = []
+    now_ms = exchange.milliseconds()
+
+    since = (
+        now_ms
+        - (
+            MONTHS_BACK
+            * 30
+            * 24
+            * 60
+            * 60
+            * 1000
+        )
+    )
+
+    candles = []
+
     tf_ms = 60 * 60 * 1000
 
-    while since < now:
-        batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=LIMIT)
-        if not batch:
-            break
-        data.extend(batch)
-        since = batch[-1][0] + tf_ms
+    while since < now_ms:
 
-    df = pd.DataFrame(data, columns=["ts","o","h","l","c","v"])
-    df.drop_duplicates("ts", inplace=True)
-    df.reset_index(drop=True, inplace=True)
+        try:
+
+            batch = exchange.fetch_ohlcv(
+                symbol,
+                timeframe=timeframe,
+                since=since,
+                limit=LIMIT
+            )
+
+            if not batch:
+                break
+
+            candles.extend(batch)
+
+            last_ts = batch[-1][0]
+
+            if last_ts <= since:
+                break
+
+            since = last_ts + tf_ms
+
+        except Exception as e:
+
+            print(
+                "FETCH ERROR:",
+                symbol,
+                timeframe,
+                e
+            )
+
+            break
+
+    if len(candles) == 0:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(
+        candles,
+        columns=[
+            "ts",
+            "o",
+            "h",
+            "l",
+            "c",
+            "v"
+        ]
+    )
+
+    df.drop_duplicates(
+        subset=["ts"],
+        inplace=True
+    )
+
+    df.reset_index(
+        drop=True,
+        inplace=True
+    )
+
     return df
 
 
-# =========================
-# ATR
-# =========================
-def atr(df, length=14):
-    high = df["h"]
-    low = df["l"]
-    close = df["c"]
+def signal(df):
 
-    tr = np.maximum(
-        high - low,
-        np.maximum(abs(high - close.shift(1)), abs(low - close.shift(1)))
-    )
-
-    return tr.rolling(length).mean()
-
-
-# =========================
-# SWINGS (100% SAFE FIX)
-# =========================
-def swings(df):
-    if df is None or len(df) < (PIVOT * 2 + 5):
-        return [], []
+    if len(df) < 100:
+        return None
 
     highs = df["h"].values
     lows = df["l"].values
+    close = df["c"].iloc[-1]
 
-    sh = []
-    sl = []
+    swing_highs = []
+    swing_lows = []
 
-    for i in range(PIVOT, len(df) - PIVOT):
-        try:
-            if highs[i] == np.max(highs[i-PIVOT:i+PIVOT+1]):
-                sh.append(float(highs[i]))
-            if lows[i] == np.min(lows[i-PIVOT:i+PIVOT+1]):
-                sl.append(float(lows[i]))
-        except:
-            continue
+    for i in range(
+        PIVOT,
+        len(df) - PIVOT
+    ):
 
-    # 🔥 HARD GUARANTEE: always lists
-    if not isinstance(sh, list):
-        sh = []
-    if not isinstance(sl, list):
-        sl = []
+        if highs[i] == np.max(
+            highs[
+                i-PIVOT:
+                i+PIVOT+1
+            ]
+        ):
+            swing_highs.append(
+                highs[i]
+            )
 
-    return sh, sl
+        if lows[i] == np.min(
+            lows[
+                i-PIVOT:
+                i+PIVOT+1
+            ]
+        ):
+            swing_lows.append(
+                lows[i]
+            )
 
-
-# =========================
-# DISPLACEMENT
-# =========================
-def displacement(candle, atr_val):
-    return abs(candle["c"] - candle["o"]) > atr_val * DISP_ATR
-
-
-# =========================
-# FVG
-# =========================
-def detect_fvg(df, i):
-    if i < 2:
+    if (
+        len(swing_highs) < 2
+        or
+        len(swing_lows) < 2
+    ):
         return None
 
-    c1 = df.iloc[i-2]
-    c3 = df.iloc[i]
+    last_high = max(
+        swing_highs[-2:]
+    )
 
-    if c1["h"] < c3["l"]:
-        return "bull"
-    if c1["l"] > c3["h"]:
-        return "bear"
+    last_low = min(
+        swing_lows[-2:]
+    )
+
+    sweep_high = (
+        close > last_high
+        and
+        (
+            abs(close - last_high)
+            / last_high
+        )
+        > MIN_SWEEP_PCT
+    )
+
+    sweep_low = (
+        close < last_low
+        and
+        (
+            abs(close - last_low)
+            / last_low
+        )
+        > MIN_SWEEP_PCT
+    )
+
+    trend_up = (
+        swing_lows[-1]
+        >
+        swing_lows[-2]
+    )
+
+    trend_down = (
+        swing_highs[-1]
+        <
+        swing_highs[-2]
+    )
+
+    if trend_up and sweep_low:
+        return "LONG"
+
+    if trend_down and sweep_high:
+        return "SHORT"
 
     return None
 
 
-# =========================
-# BACKTEST
-# =========================
 def backtest(df):
 
-    df["atr"] = atr(df, ATR_LEN)
-
     trades = []
-    equity = 1.0
-    curve = [equity]
-
-    state = None
-    direction = None
-    setup_i = None
 
     future_bars = 12
 
-    sh, sl = swings(df)
+    for i in range(
+        100,
+        len(df) - future_bars
+    ):
 
-    # 🔥 FINAL SAFETY CHECK
-    if not isinstance(sh, list):
-        sh = []
-    if not isinstance(sl, list):
-        sl = []
+        sub = df.iloc[:i]
 
-    if len(sh) == 0 or len(sl) == 0:
-        return [], []
+        side = signal(sub)
 
-    i = 120
-
-    while i < len(df) - future_bars:
-
-        atr_val = df["atr"].iloc[i]
-
-        if np.isnan(atr_val):
-            i += 1
+        if side is None:
             continue
 
-        if len(sh) == 0 or len(sl) == 0:
-            i += 1
-            continue
+        entry = sub["c"].iloc[-1]
 
-        last_sh = sh[-1]
-        last_sl = sl[-1]
+        if side == "LONG":
 
-        candle = df.iloc[i]
+            tp = entry * (
+                1 + (
+                    SL_PCT * RR
+                )
+            )
 
-        sweep = None
-        fvg = detect_fvg(df, i)
+            sl = entry * (
+                1 - SL_PCT
+            )
 
-        # =========================
-        # SWEEP
-        # =========================
-        if candle["l"] < last_sl:
-            sweep = "LONG"
-        elif candle["h"] > last_sh:
-            sweep = "SHORT"
+        else:
 
-        # =========================
-        # STATE 0
-        # =========================
-        if state is None:
-            if sweep:
-                state = "sweep"
-                direction = sweep
-                setup_i = i
-            i += 1
-            continue
+            tp = entry * (
+                1 - (
+                    SL_PCT * RR
+                )
+            )
 
-        # =========================
-        # STATE 1
-        # =========================
-        if state == "sweep":
+            sl = entry * (
+                1 + SL_PCT
+            )
 
-            if i - setup_i > DISPLACEMENT_WINDOW:
-                state = None
-                i += 1
-                continue
+        result = False
 
-            if displacement(candle, atr_val):
-                state = "disp"
+        future = df.iloc[
+            i:i+future_bars
+        ]
 
-            i += 1
-            continue
+        for _, row in future.iterrows():
 
-        # =========================
-        # STATE 2
-        # =========================
-        if state == "disp":
+            if side == "LONG":
 
-            if i - setup_i > FVG_WINDOW:
-                state = None
-                i += 1
-                continue
+                if row["h"] >= tp:
+                    result = True
+                    break
 
-            if fvg is not None:
-                state = "ready"
+                if row["l"] <= sl:
+                    break
 
-            i += 1
-            continue
-
-        # =========================
-        # STATE 3 ENTRY
-        # =========================
-        if state == "ready":
-
-            entry_idx = i + 1
-            if entry_idx >= len(df):
-                break
-
-            entry = df["o"].iloc[entry_idx]
-
-            sl_dist = atr_val * SL_ATR_MULT
-
-            if direction == "LONG":
-                sl = entry - sl_dist
-                tp = entry + sl_dist * RR
             else:
-                sl = entry + sl_dist
-                tp = entry - sl_dist * RR
 
-            future = df.iloc[entry_idx:entry_idx+future_bars]
+                if row["l"] <= tp:
+                    result = True
+                    break
 
-            result = None
+                if row["h"] >= sl:
+                    break
 
-            for _, row in future.iterrows():
+        trades.append(result)
 
-                if direction == "LONG":
-                    if row["l"] <= sl:
-                        result = -1
-                        break
-                    if row["h"] >= tp:
-                        result = 1
-                        break
-                else:
-                    if row["h"] >= sl:
-                        result = -1
-                        break
-                    if row["l"] <= tp:
-                        result = 1
-                        break
-
-            if result is None:
-                state = None
-                i += 1
-                continue
-
-            r = result * (sl_dist / entry)
-
-            r -= FEE * 2
-            r -= SLIPPAGE
-
-            equity *= (1 + r)
-            curve.append(equity)
-
-            trades.append(result > 0)
-
-            state = None
-
-        i += 1
-
-    return trades, curve
+    return trades
 
 
-# =========================
-# RUN
-# =========================
-print("===== DYDX V6.2 FIXED STATE MACHINE REPORT =====")
+print("===== DYDX V6 REPORT =====")
 
-df = fetch_data(PAIR, TIMEFRAME)
+print(
+    "Loading",
+    PAIR,
+    TIMEFRAME
+)
+
+df = fetch_data(
+    PAIR,
+    TIMEFRAME
+)
 
 if df.empty:
+
     print("NO DATA")
-    exit()
 
-print("Candles:", len(df))
-
-trades, curve = backtest(df)
-
-if not trades:
-    print("NO SIGNAL")
 else:
-    wins = sum(trades)
-    losses = len(trades) - wins
 
-    wr = round(wins / len(trades) * 100, 2)
+    print(
+        "Candles:",
+        len(df)
+    )
 
-    print(f"Trades:{len(trades)} | Win:{wins} Loss:{losses} | WR:{wr}%")
-    print(f"Final Equity: {round(curve[-1],3)}")
+    results = backtest(df)
+
+    if len(results) == 0:
+
+        print("NO SIGNAL")
+
+    else:
+
+        wins = sum(results)
+
+        losses = (
+            len(results)
+            - wins
+        )
+
+        wr = round(
+            (
+                wins
+                / len(results)
+            ) * 100,
+            2
+        )
+
+        print(
+            f"{PAIR} "
+            f"| Trades:{len(results)} "
+            f"| Win:{wins} "
+            f"Loss:{losses} "
+            f"| WR:{wr}%"
+        )
