@@ -3,268 +3,171 @@ import pandas as pd
 import numpy as np
 
 PAIR = "DYDX/USDT:USDT"
-
 TIMEFRAME = "1h"
 
 MONTHS_BACK = 3
 PIVOT = 8
-
-SL_PCT = 0.01
-RR = 1.3
 LIMIT = 500
 
-MIN_SWEEP_PCT = 0.004
+SL_PCT = 0.01
+RR = 1.5
+FUTURE_BARS = 12
+
+MIN_SWEEP_PCT = 0.003
 
 exchange = ccxt.okx({
     "enableRateLimit": True,
-    "options": {
-        "defaultType": "swap"
-    }
+    "options": {"defaultType": "swap"}
 })
 
 
 def fetch_data(symbol, timeframe):
-
-    now_ms = exchange.milliseconds()
-
-    since = (
-        now_ms
-        - (
-            MONTHS_BACK
-            * 30
-            * 24
-            * 60
-            * 60
-            * 1000
-        )
-    )
-
-    candles = []
+    now = exchange.milliseconds()
+    since = now - MONTHS_BACK * 30 * 24 * 60 * 60 * 1000
 
     tf_ms = 60 * 60 * 1000
+    candles = []
 
-    while since < now_ms:
-
-        try:
-
-            batch = exchange.fetch_ohlcv(
-                symbol,
-                timeframe=timeframe,
-                since=since,
-                limit=LIMIT
-            )
-
-            if not batch:
-                break
-
-            candles.extend(batch)
-
-            last_ts = batch[-1][0]
-
-            if last_ts <= since:
-                break
-
-            since = last_ts + tf_ms
-
-        except Exception as e:
-
-            print(
-                "FETCH ERROR:",
-                symbol,
-                timeframe,
-                e
-            )
-
+    while since < now:
+        batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=LIMIT)
+        if not batch:
             break
 
-    if len(candles) == 0:
-        return pd.DataFrame()
+        candles.extend(batch)
+        last = batch[-1][0]
 
-    df = pd.DataFrame(
-        candles,
-        columns=[
-            "ts",
-            "o",
-            "h",
-            "l",
-            "c",
-            "v"
-        ]
-    )
+        if last <= since:
+            break
 
-    df.drop_duplicates(
-        subset=["ts"],
-        inplace=True
-    )
+        since = last + tf_ms
 
-    df.reset_index(
-        drop=True,
-        inplace=True
-    )
-
+    df = pd.DataFrame(candles, columns=["ts","o","h","l","c","v"])
+    df.drop_duplicates(subset=["ts"], inplace=True)
+    df.reset_index(drop=True, inplace=True)
     return df
 
 
-def signal(df):
-
-    if len(df) < 100:
-        return None
-
+# -------------------------
+# SWING STRUCTURE
+# -------------------------
+def get_swings(df):
     highs = df["h"].values
     lows = df["l"].values
-    close = df["c"].iloc[-1]
 
     swing_highs = []
     swing_lows = []
 
-    for i in range(
-        PIVOT,
-        len(df) - PIVOT
-    ):
+    for i in range(PIVOT, len(df) - PIVOT):
+        if highs[i] >= np.max(highs[i-PIVOT:i+PIVOT+1]):
+            swing_highs.append((i, highs[i]))
 
-        if highs[i] == np.max(
-            highs[
-                i-PIVOT:
-                i+PIVOT+1
-            ]
-        ):
-            swing_highs.append(
-                highs[i]
-            )
+        if lows[i] <= np.min(lows[i-PIVOT:i+PIVOT+1]):
+            swing_lows.append((i, lows[i]))
 
-        if lows[i] == np.min(
-            lows[
-                i-PIVOT:
-                i+PIVOT+1
-            ]
-        ):
-            swing_lows.append(
-                lows[i]
-            )
+    return swing_highs, swing_lows
 
-    if (
-        len(swing_highs) < 2
-        or
-        len(swing_lows) < 2
-    ):
+
+# -------------------------
+# SIGNAL ENGINE (V7)
+# -------------------------
+def signal(df):
+    if len(df) < 120:
         return None
 
-    last_high = max(
-        swing_highs[-2:]
-    )
+    swing_highs, swing_lows = get_swings(df)
 
-    last_low = min(
-        swing_lows[-2:]
-    )
+    if len(swing_highs) < 3 or len(swing_lows) < 3:
+        return None
 
+    last_high = swing_highs[-1][1]
+    prev_high = swing_highs[-2][1]
+
+    last_low = swing_lows[-1][1]
+    prev_low = swing_lows[-2][1]
+
+    c = df["c"].iloc[-1]
+    h = df["h"].iloc[-1]
+    l = df["l"].iloc[-1]
+    o = df["o"].iloc[-1]
+
+    # -------------------------
+    # REAL SWEEP LOGIC
+    # -------------------------
     sweep_high = (
-        close > last_high
-        and
-        (
-            abs(close - last_high)
-            / last_high
-        )
-        > MIN_SWEEP_PCT
+        h > last_high and
+        c < last_high and
+        ((h - last_high) / last_high) > MIN_SWEEP_PCT
     )
 
     sweep_low = (
-        close < last_low
-        and
-        (
-            abs(close - last_low)
-            / last_low
-        )
-        > MIN_SWEEP_PCT
+        l < last_low and
+        c > last_low and
+        ((last_low - l) / last_low) > MIN_SWEEP_PCT
     )
 
-    trend_up = (
-        swing_lows[-1]
-        >
-        swing_lows[-2]
-    )
+    # -------------------------
+    # STRUCTURE TREND (BOS STYLE)
+    # -------------------------
+    trend_up = (last_low > prev_low)
+    trend_down = (last_high < prev_high)
 
-    trend_down = (
-        swing_highs[-1]
-        <
-        swing_highs[-2]
-    )
+    # BOS confirmation (simple displacement idea)
+    bos_up = c > last_high
+    bos_down = c < last_low
 
-    if trend_up and sweep_low:
+    # -------------------------
+    # FINAL SIGNALS
+    # -------------------------
+    if trend_up and sweep_low and bos_up:
         return "LONG"
 
-    if trend_down and sweep_high:
+    if trend_down and sweep_high and bos_down:
         return "SHORT"
 
     return None
 
 
+# -------------------------
+# BACKTEST
+# -------------------------
 def backtest(df):
-
     trades = []
 
-    future_bars = 12
-
-    for i in range(
-        100,
-        len(df) - future_bars
-    ):
+    for i in range(120, len(df) - FUTURE_BARS):
 
         sub = df.iloc[:i]
-
         side = signal(sub)
 
-        if side is None:
+        if not side:
             continue
 
-        entry = sub["c"].iloc[-1]
+        entry = df["o"].iloc[i + 1]  # NEXT CANDLE OPEN
 
         if side == "LONG":
-
-            tp = entry * (
-                1 + (
-                    SL_PCT * RR
-                )
-            )
-
-            sl = entry * (
-                1 - SL_PCT
-            )
+            sl = entry * (1 - SL_PCT)
+            tp = entry + (entry - sl) * RR
 
         else:
+            sl = entry * (1 + SL_PCT)
+            tp = entry - (sl - entry) * RR
 
-            tp = entry * (
-                1 - (
-                    SL_PCT * RR
-                )
-            )
-
-            sl = entry * (
-                1 + SL_PCT
-            )
+        future = df.iloc[i+1:i+1+FUTURE_BARS]
 
         result = False
-
-        future = df.iloc[
-            i:i+future_bars
-        ]
 
         for _, row in future.iterrows():
 
             if side == "LONG":
-
                 if row["h"] >= tp:
                     result = True
                     break
-
                 if row["l"] <= sl:
                     break
 
             else:
-
                 if row["l"] <= tp:
                     result = True
                     break
-
                 if row["h"] >= sl:
                     break
 
@@ -273,57 +176,33 @@ def backtest(df):
     return trades
 
 
-print("===== DYDX V6 REPORT =====")
+# -------------------------
+# RUN
+# -------------------------
+print("===== DYDX V7 REPORT =====")
+print("Loading", PAIR, TIMEFRAME)
 
-print(
-    "Loading",
-    PAIR,
-    TIMEFRAME
-)
-
-df = fetch_data(
-    PAIR,
-    TIMEFRAME
-)
+df = fetch_data(PAIR, TIMEFRAME)
 
 if df.empty:
-
     print("NO DATA")
 
 else:
-
-    print(
-        "Candles:",
-        len(df)
-    )
+    print("Candles:", len(df))
 
     results = backtest(df)
 
-    if len(results) == 0:
-
+    if not results:
         print("NO SIGNAL")
 
     else:
-
         wins = sum(results)
+        losses = len(results) - wins
 
-        losses = (
-            len(results)
-            - wins
-        )
-
-        wr = round(
-            (
-                wins
-                / len(results)
-            ) * 100,
-            2
-        )
+        wr = round(wins / len(results) * 100, 2)
 
         print(
-            f"{PAIR} "
-            f"| Trades:{len(results)} "
-            f"| Win:{wins} "
-            f"Loss:{losses} "
+            f"{PAIR} | Trades:{len(results)} "
+            f"| Win:{wins} Loss:{losses} "
             f"| WR:{wr}%"
         )
