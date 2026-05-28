@@ -1,4 +1,3 @@
-```python
 import ccxt
 import pandas as pd
 import numpy as np
@@ -7,8 +6,8 @@ import numpy as np
 # CONFIG
 # ==========================
 TIMEFRAMES = {
-    "15m": 17280,   # ~6 ay
-    "1h": 4320      # ~6 ay
+    "15m": 17280,   # yaklaşık 6 ay
+    "1h": 4320      # yaklaşık 6 ay
 }
 
 PIVOT = 5
@@ -54,12 +53,12 @@ def swings(df):
     sh = []
     sl = []
 
-    for i in range(PIVOT, len(df)-PIVOT):
+    for i in range(PIVOT, len(df) - PIVOT):
 
-        if h[i] == np.max(h[i-PIVOT:i+PIVOT+1]):
+        if h[i] == np.max(h[i - PIVOT:i + PIVOT + 1]):
             sh.append((i, h[i]))
 
-        if l[i] == np.min(l[i-PIVOT:i+PIVOT+1]):
+        if l[i] == np.min(l[i - PIVOT:i + PIVOT + 1]):
             sl.append((i, l[i]))
 
     return sh, sl
@@ -91,7 +90,7 @@ def liquidity(close, sh, sl):
         return False, False
 
     sweep_high = close >= max([x[1] for x in sh[-2:]])
-    sweep_low  = close <= min([x[1] for x in sl[-2:]])
+    sweep_low = close <= min([x[1] for x in sl[-2:]])
 
     return sweep_high, sweep_low
 
@@ -140,7 +139,7 @@ def signal(sub):
 
     sweep_high, sweep_low = liquidity(close, sh, sl)
 
-    ob = order_block(sub, len(sub)-2)
+    ob = order_block(sub, len(sub) - 2)
 
     if ob is None:
         return None
@@ -171,7 +170,7 @@ def backtest(df):
 
     trades = []
 
-    for i in range(80, len(df)-24):
+    for i in range(80, len(df) - 24):
 
         sub = df.iloc[:i]
 
@@ -190,7 +189,7 @@ def backtest(df):
             tp = entry * (1 - SL_PCT * RR)
             sl = entry * (1 + SL_PCT)
 
-        future = df.iloc[i:i+24]
+        future = df.iloc[i:i + 24]
 
         result = False
 
@@ -255,4 +254,3 @@ def run():
 
 if __name__ == "__main__":
     run()
-```
