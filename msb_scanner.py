@@ -6,7 +6,9 @@ import datetime
 PAIR = "DYDX/USDT:USDT"
 TIMEFRAME = "1h"
 
-MONTHS_BACK = 3
+# 🔥 UPGRADE: 12 AY
+MONTHS_BACK = 12
+
 PIVOT = 8
 LIMIT = 500
 
@@ -23,10 +25,12 @@ exchange = ccxt.okx({
 
 
 # -------------------------
-# DATA FETCH
+# DATA
 # -------------------------
 def fetch_data(symbol, timeframe):
     now = exchange.milliseconds()
+
+    # 12 months back
     since = now - MONTHS_BACK * 30 * 24 * 60 * 60 * 1000
 
     tf_ms = 60 * 60 * 1000
@@ -60,19 +64,17 @@ def fetch_data(symbol, timeframe):
 
 
 # -------------------------
-# SESSION FILTER (NEW)
-# UTC time: London + NY active zone
+# SESSION FILTER
 # -------------------------
 def is_trading_session(ts):
     dt = datetime.datetime.utcfromtimestamp(ts / 1000)
     hour = dt.hour
 
-    # 12:00 - 20:00 UTC = high liquidity session
     return 12 <= hour <= 20
 
 
 # -------------------------
-# SWING DETECTION
+# SWINGS
 # -------------------------
 def get_swings(df):
     highs = df["h"].values
@@ -93,10 +95,10 @@ def get_swings(df):
 
 
 # -------------------------
-# SIGNAL ENGINE (V6.3)
+# SIGNAL
 # -------------------------
 def signal(df):
-    if len(df) < 120:
+    if len(df) < 200:
         return None
 
     # SESSION FILTER
@@ -118,9 +120,6 @@ def signal(df):
     l = df["l"].iloc[-1]
     c = df["c"].iloc[-1]
 
-    # -------------------------
-    # REAL SWEEP LOGIC
-    # -------------------------
     sweep_high = (
         h > last_high and
         c < last_high and
@@ -133,15 +132,9 @@ def signal(df):
         ((last_low - l) / last_low) > MIN_SWEEP_PCT
     )
 
-    # -------------------------
-    # SIMPLE TREND FILTER
-    # -------------------------
     trend_up = last_low > prev_low
     trend_down = last_high < prev_high
 
-    # -------------------------
-    # FINAL SIGNAL
-    # -------------------------
     if trend_up and sweep_low:
         return "LONG"
 
@@ -152,12 +145,12 @@ def signal(df):
 
 
 # -------------------------
-# BACKTEST
+# BACKTEST FIX (SMALL BUT IMPORTANT)
 # -------------------------
 def backtest(df):
     trades = []
 
-    for i in range(120, len(df) - FUTURE_BARS):
+    for i in range(200, len(df) - FUTURE_BARS):
 
         sub = df.iloc[:i]
         side = signal(sub)
@@ -187,7 +180,7 @@ def backtest(df):
                 if row["l"] <= sl:
                     break
             else:
-                if row["l"] >= tp:
+                if row["l"] <= tp:
                     result = True
                     break
                 if row["h"] >= sl:
@@ -201,7 +194,7 @@ def backtest(df):
 # -------------------------
 # RUN
 # -------------------------
-print("===== DYDX V6.3 REPORT =====")
+print("===== DYDX V6.3 (12M TEST) REPORT =====")
 print("Loading", PAIR, TIMEFRAME)
 
 df = fetch_data(PAIR, TIMEFRAME)
