@@ -4,19 +4,22 @@ import numpy as np
 import requests
 import os
 import json
-import hashlib
+import time
 from datetime import datetime
+
+# =========================
+# ENV (GitHub Secrets)
+# =========================
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID        = os.environ.get("CHAT_ID")
 
 # =========================
 # CONFIG
 # =========================
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-CHAT_ID        = os.environ["CHAT_ID"]
-
-CANDLE_COUNT = 300
-PIVOT_LEN    = 5
-OB_LOOKBACK  = 20
-STATE_FILE   = "state.json"
+CANDLE_COUNT = 200
+PIVOT_LEN = 4
+OB_LOOKBACK = 15
+STATE_FILE = "state.json"
 
 TIMEFRAMES = {
     "15m": "15m",
@@ -27,104 +30,104 @@ TIMEFRAMES = {
 PAIRS = [
     "BTC/USDT:USDT","ETH/USDT:USDT","SOL/USDT:USDT",
     "XRP/USDT:USDT","ADA/USDT:USDT","AVAX/USDT:USDT",
+    "DOGE/USDT:USDT","LINK/USDT:USDT","TON/USDT:USDT",
+    "DOT/USDT:USDT","TRX/USDT:USDT","MATIC/USDT:USDT",
+    "LTC/USDT:USDT","BCH/USDT:USDT","ATOM/USDT:USDT",
+    "NEAR/USDT:USDT","ARB/USDT:USDT","OP/USDT:USDT",
+    "INJ/USDT:USDT","APT/USDT:USDT"
 ]
-
 
 # =========================
 # STATE
 # =========================
 def load_state():
     if os.path.exists(STATE_FILE):
-        return json.load(open(STATE_FILE))
-    return {}
+        return set(json.load(open(STATE_FILE)))
+    return set()
 
 def save_state(state):
     with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
-
+        json.dump(list(state), f)
 
 # =========================
-# TELEGRAM
+# TELEGRAM (DEBUG VERSION)
 # =========================
 def send(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+    print("\n===== TELEGRAM DEBUG =====")
 
+    print("[DEBUG] TOKEN:", bool(TELEGRAM_TOKEN))
+    print("[DEBUG] CHAT_ID:", bool(CHAT_ID))
+
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        print("[ERROR] ENV missing!")
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": msg
+    }
+
+    try:
+        r = requests.post(url, data=payload, timeout=10)
+
+        print("[DEBUG] STATUS:", r.status_code)
+        print("[DEBUG] RESPONSE:", r.text)
+
+        if r.status_code == 200:
+            print("[SUCCESS] Telegram sent")
+        else:
+            print("[FAIL] Telegram error")
+
+    except Exception as e:
+        print("[EXCEPTION]", str(e))
 
 # =========================
 # DATA
 # =========================
 def fetch(exchange, symbol, tf):
-    df = pd.DataFrame(
-        exchange.fetch_ohlcv(symbol, tf, limit=CANDLE_COUNT),
-        columns=["t","o","h","l","c","v"]
-    )
-    return df
-
+    try:
+        data = exchange.fetch_ohlcv(symbol, tf, limit=CANDLE_COUNT)
+        time.sleep(0.08)
+        return pd.DataFrame(data, columns=["t","o","h","l","c","v"])
+    except Exception as e:
+        print("[FETCH ERROR]", symbol, tf, e)
+        return pd.DataFrame()
 
 # =========================
-# SWING ENGINE (REAL PIVOTS)
+# SWING ENGINE
 # =========================
 def swings(df):
-    highs = df["h"].values
-    lows  = df["l"].values
+    if df.empty:
+        return [], []
 
-    swing_highs = []
-    swing_lows  = []
+    h = df["h"].values
+    l = df["l"].values
+
+    sh, sl = [], []
 
     for i in range(PIVOT_LEN, len(df)-PIVOT_LEN):
-        if highs[i] == max(highs[i-PIVOT_LEN:i+PIVOT_LEN]):
-            swing_highs.append((i, highs[i]))
-        if lows[i] == min(lows[i-PIVOT_LEN:i+PIVOT_LEN]):
-            swing_lows.append((i, lows[i]))
+        if h[i] == np.max(h[i-PIVOT_LEN:i+PIVOT_LEN]):
+            sh.append(h[i])
+        if l[i] == np.min(l[i-PIVOT_LEN:i+PIVOT_LEN]):
+            sl.append(l[i])
 
-    return swing_highs, swing_lows
-
-
-# =========================
-# LIQUIDITY SWEEP
-# =========================
-def liquidity_sweep(df, swing_highs, swing_lows):
-    price = df["c"].iloc[-1]
-
-    swept_high = any(price > h for _, h in swing_highs[-3:])
-    swept_low  = any(price < l for _, l in swing_lows[-3:])
-
-    return swept_high, swept_low
-
+    return sh, sl
 
 # =========================
-# STRUCTURE (BOS / CHOCH)
+# STRUCTURE
 # =========================
-def structure(df, swing_highs, swing_lows):
-    if len(swing_highs) < 2 or len(swing_lows) < 2:
+def structure(sh, sl, close):
+    if len(sh) < 2 or len(sl) < 2:
         return None
 
-    last_high = swing_highs[-1][1]
-    prev_high = swing_highs[-2][1]
-
-    last_low = swing_lows[-1][1]
-    prev_low = swing_lows[-2][1]
-
-    close = df["c"].iloc[-1]
-
-    # BOS bullish
-    if close > last_high:
+    if close > sh[-1]:
         return "BOS_UP"
-
-    # BOS bearish
-    if close < last_low:
+    if close < sl[-1]:
         return "BOS_DOWN"
 
-    # CHoCH simple proxy
-    if last_high < prev_high and close < last_low:
-        return "CHOCH_DOWN"
-
-    if last_low > prev_low and close > last_high:
-        return "CHOCH_UP"
-
     return None
-
 
 # =========================
 # ORDER BLOCK
@@ -135,54 +138,58 @@ def order_block(df):
             return (df["h"].iloc[i], df["l"].iloc[i])
     return None
 
-
 # =========================
 # SIGNAL ENGINE
 # =========================
-def signal_engine(df, swings_high, swings_low):
-    sweep_high, sweep_low = liquidity_sweep(df, swings_high, swings_low)
-    struct = structure(df, swings_high, swings_low)
+def signal(df):
+    if df.empty or len(df) < 50:
+        return None
+
+    close = df["c"].iloc[-1]
+
+    sh, sl = swings(df)
+    struct = structure(sh, sl, close)
     ob = order_block(df)
 
-    if ob is None or struct is None:
+    if not struct or not ob:
         return None
 
-    ob_high, ob_low = ob
-    price = df["c"].iloc[-1]
+    ob_h, ob_l = ob
 
-    intersect = (min(ob_high, price), max(ob_low, price))
+    top = min(ob_h, close)
+    bot = max(ob_l, close)
 
-    if intersect[0] <= intersect[1]:
+    if top <= bot:
         return None
 
-    if struct in ["BOS_UP", "CHOCH_UP"] and sweep_low:
-        return "LONG", intersect
+    if struct == "BOS_UP":
+        return "LONG", (top, bot)
 
-    if struct in ["BOS_DOWN", "CHOCH_DOWN"] and sweep_high:
-        return "SHORT", intersect
+    if struct == "BOS_DOWN":
+        return "SHORT", (top, bot)
 
     return None
-
 
 # =========================
 # MAIN
 # =========================
 def run():
+    print("===== SYSTEM START =====")
+
     ex = ccxt.okx({"options": {"defaultType": "swap"}})
 
     state = load_state()
 
-    while True:
-        for tf in TIMEFRAMES:
-            for pair in PAIRS:
+    print("[INFO] Pairs:", len(PAIRS))
 
+    for pair in PAIRS:
+        for tf in TIMEFRAMES:
+
+            try:
                 df = fetch(ex, pair, TIMEFRAMES[tf])
 
-                sh, sl = swings(df)
-
-                res = signal_engine(df, sh, sl)
-
-                if res is None:
+                res = signal(df)
+                if not res:
                     continue
 
                 direction, zone = res
@@ -192,7 +199,7 @@ def run():
                 if key in state:
                     continue
 
-                state[key] = True
+                state.add(key)
 
                 msg = f"""
 {'🟢 LONG' if direction=='LONG' else '🔴 SHORT'}
@@ -205,10 +212,15 @@ Time: {datetime.utcnow()}
 
                 send(msg)
 
-                print("SENT:", key)
+                print("[SENT]", key)
 
-        save_state(state)
+                time.sleep(0.15)
 
+            except Exception as e:
+                print("[ERROR]", pair, tf, e)
+
+    save_state(state)
+    print("===== SYSTEM END =====")
 
 if __name__ == "__main__":
     run()
