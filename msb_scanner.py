@@ -3,8 +3,8 @@ import ccxt
 import pandas as pd
 import numpy as np
 import os
+import time
 
-# SETTINGS
 SYMBOL = "BTC/USDT:USDT"
 TIMEFRAME = "1h"
 
@@ -13,7 +13,6 @@ RISK_PER_TRADE_USD = 10
 MAX_POSITION_USD = 100
 RR = 1.8
 
-# OKX CONNECTION
 exchange = ccxt.okx({
     "apiKey": os.getenv("OKX_API_KEY"),
     "secret": os.getenv("OKX_SECRET"),
@@ -24,8 +23,9 @@ exchange = ccxt.okx({
     }
 })
 
-# FETCH DATA
+
 def fetch():
+
     bars = exchange.fetch_ohlcv(
         SYMBOL,
         timeframe=TIMEFRAME,
@@ -44,7 +44,7 @@ def fetch():
         ]
     )
 
-# ATR
+
 def atr(df, period=14):
 
     hl = df["h"] - df["l"]
@@ -58,7 +58,7 @@ def atr(df, period=14):
 
     return tr.rolling(period).mean()
 
-# TREND
+
 def trend(df):
 
     ma50 = df["c"].rolling(50).mean()
@@ -69,7 +69,7 @@ def trend(df):
 
     return "SHORT"
 
-# SIGNAL
+
 def signal(df):
 
     if len(df) < 200:
@@ -99,7 +99,7 @@ def signal(df):
 
     return None
 
-# STOP LOSS
+
 def smart_stop(df, side):
 
     a = atr(df).iloc[-1]
@@ -131,7 +131,7 @@ def smart_stop(df, side):
         price + a
     )
 
-# TAKE PROFIT
+
 def smart_tp(entry, sl, side):
 
     risk = abs(entry - sl)
@@ -141,7 +141,7 @@ def smart_tp(entry, sl, side):
 
     return entry - (risk * RR)
 
-# POSITION SIZE
+
 def position_size(entry, sl):
 
     stop_distance = abs(entry - sl)
@@ -166,7 +166,7 @@ def position_size(entry, sl):
 
     return round(qty, 6)
 
-# OPEN POSITION CHECK
+
 def get_position():
 
     try:
@@ -200,7 +200,7 @@ def get_position():
 
     return None
 
-# CLOSE POSITION
+
 def close_position(position):
 
     qty = position["qty"]
@@ -212,7 +212,9 @@ def close_position(position):
             exchange.create_market_sell_order(
                 SYMBOL,
                 qty,
-                params={"tdMode": "isolated"}
+                params={
+                    "tdMode": "isolated"
+                }
             )
 
         else:
@@ -220,7 +222,9 @@ def close_position(position):
             exchange.create_market_buy_order(
                 SYMBOL,
                 qty,
-                params={"tdMode": "isolated"}
+                params={
+                    "tdMode": "isolated"
+                }
             )
 
         print("Position closed")
@@ -228,8 +232,50 @@ def close_position(position):
     except Exception as e:
         print("Close error:", e)
 
-# OPEN POSITION
-def open_position(side, qty):
+
+def place_tp_sl(side, qty, sl, tp):
+
+    try:
+
+        if side == "LONG":
+
+            exchange.create_order(
+                SYMBOL,
+                "market",
+                "sell",
+                qty,
+                None,
+                {
+                    "tdMode": "isolated",
+                    "stopLossPrice": round(sl, 2),
+                    "takeProfitPrice": round(tp, 2),
+                    "reduceOnly": True
+                }
+            )
+
+        else:
+
+            exchange.create_order(
+                SYMBOL,
+                "market",
+                "buy",
+                qty,
+                None,
+                {
+                    "tdMode": "isolated",
+                    "stopLossPrice": round(sl, 2),
+                    "takeProfitPrice": round(tp, 2),
+                    "reduceOnly": True
+                }
+            )
+
+        print("SL/TP placed")
+
+    except Exception as e:
+        print("SL TP error:", e)
+
+
+def open_position(side, qty, sl, tp):
 
     try:
 
@@ -238,7 +284,9 @@ def open_position(side, qty):
             exchange.create_market_buy_order(
                 SYMBOL,
                 qty,
-                params={"tdMode": "isolated"}
+                params={
+                    "tdMode": "isolated"
+                }
             )
 
         else:
@@ -246,15 +294,26 @@ def open_position(side, qty):
             exchange.create_market_sell_order(
                 SYMBOL,
                 qty,
-                params={"tdMode": "isolated"}
+                params={
+                    "tdMode": "isolated"
+                }
             )
 
         print("OPEN", side)
 
+        time.sleep(2)
+
+        place_tp_sl(
+            side,
+            qty,
+            sl,
+            tp
+        )
+
     except Exception as e:
         print("Open error:", e)
 
-# LEVERAGE
+
 try:
 
     exchange.set_leverage(
@@ -269,7 +328,7 @@ try:
 except Exception as e:
     print("Leverage warning:", e)
 
-# MAIN
+
 try:
 
     print("===== BTC BOT START =====")
@@ -316,13 +375,30 @@ try:
                     )
 
                     close_position(pos)
-                    open_position(sig, qty)
+
+                    time.sleep(2)
+
+                    open_position(
+                        sig,
+                        qty,
+                        sl,
+                        tp
+                    )
 
                 else:
-                    print("Same position open")
+
+                    print(
+                        "Same position open"
+                    )
 
             else:
-                open_position(sig, qty)
+
+                open_position(
+                    sig,
+                    qty,
+                    sl,
+                    tp
+                )
 
     print("===== DONE =====")
 
