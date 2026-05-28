@@ -13,335 +13,192 @@ MAX_POSITION_USD = 20
 RR = 1.8
 
 exchange = ccxt.okx({
-"apiKey": os.getenv("OKX_API_KEY"),
-"secret": os.getenv("OKX_SECRET"),
-"password": os.getenv("OKX_PASSWORD"),
-"enableRateLimit": True,
-"options": {
-"defaultType": "swap"
-}
+    "apiKey": os.getenv("OKX_API_KEY"),
+    "secret": os.getenv("OKX_SECRET"),
+    "password": os.getenv("OKX_PASSWORD"),
+    "enableRateLimit": True,
+    "options": {
+        "defaultType": "swap"
+    }
 })
 
+
 def fetch():
+    bars = exchange.fetch_ohlcv(
+        SYMBOL,
+        timeframe=TIMEFRAME,
+        limit=300
+    )
 
-bars = exchange.fetch_ohlcv(
-    SYMBOL,
-    timeframe=TIMEFRAME,
-    limit=300
-)
+    return pd.DataFrame(
+        bars,
+        columns=["ts", "o", "h", "l", "c", "v"]
+    )
 
-return pd.DataFrame(
-    bars,
-    columns=[
-        "ts",
-        "o",
-        "h",
-        "l",
-        "c",
-        "v"
-    ]
-)
-```
 
 def atr(df, period=14):
+    hl = df["h"] - df["l"]
+    hc = np.abs(df["h"] - df["c"].shift())
+    lc = np.abs(df["l"] - df["c"].shift())
 
-```
-hl = df["h"] - df["l"]
-hc = np.abs(df["h"] - df["c"].shift())
-lc = np.abs(df["l"] - df["c"].shift())
+    tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
 
-tr = pd.concat(
-    [hl, hc, lc],
-    axis=1
-).max(axis=1)
-
-return tr.rolling(period).mean()
-```
 
 def smart_stop(df, side):
+    a = atr(df).iloc[-1]
+    price = df["c"].iloc[-1]
 
-```
-a = atr(df).iloc[-1]
-price = df["c"].iloc[-1]
+    if side == "LONG":
+        swing_low = df["l"].rolling(10).min().iloc[-2]
+        return min(swing_low, price - a)
 
-if side == "LONG":
+    swing_high = df["h"].rolling(10).max().iloc[-2]
+    return max(swing_high, price + a)
 
-    swing_low = (
-        df["l"]
-        .rolling(10)
-        .min()
-        .iloc[-2]
-    )
-
-    return min(
-        swing_low,
-        price - a
-    )
-
-swing_high = (
-    df["h"]
-    .rolling(10)
-    .max()
-    .iloc[-2]
-)
-
-return max(
-    swing_high,
-    price + a
-)
-```
 
 def smart_tp(entry, sl, side):
+    risk = abs(entry - sl)
 
-```
-risk = abs(entry - sl)
+    if side == "LONG":
+        return entry + (risk * RR)
 
-if side == "LONG":
-    return entry + (risk * RR)
+    return entry - (risk * RR)
 
-return entry - (risk * RR)
-```
 
 def position_size(entry, sl):
+    stop_distance = abs(entry - sl)
 
-```
-stop_distance = abs(entry - sl)
+    if stop_distance <= 0:
+        return 0.01
 
-if stop_distance <= 0:
-    return 0.01
+    qty_by_risk = RISK_PER_TRADE_USD / stop_distance
+    max_qty = MAX_POSITION_USD / entry
 
-qty_by_risk = (
-    RISK_PER_TRADE_USD
-    / stop_distance
-)
+    qty = min(qty_by_risk, max_qty)
 
-max_qty = (
-    MAX_POSITION_USD
-    / entry
-)
+    # OKX minimum contract
+    qty = max(qty, 0.01)
 
-qty = min(
-    qty_by_risk,
-    max_qty
-)
+    return round(qty, 2)
 
-# OKX minimum contract fix
-qty = max(qty, 0.01)
-
-return round(qty, 2)
-```
 
 def get_position():
+    try:
+        positions = exchange.fetch_positions([SYMBOL])
 
-```
-try:
+        for p in positions:
+            contracts = float(p.get("contracts") or 0)
 
-    positions = exchange.fetch_positions(
-        [SYMBOL]
-    )
+            if contracts > 0:
+                side = p["side"]
 
-    for p in positions:
+                return {
+                    "side": "LONG" if side.lower() == "long" else "SHORT",
+                    "qty": contracts
+                }
 
-        contracts = float(
-            p.get("contracts") or 0
-        )
+    except Exception as e:
+        print("Position error:", e)
 
-        if contracts > 0:
+    return None
 
-            side = p["side"]
-
-            return {
-                "side":
-                "LONG"
-                if side.lower() == "long"
-                else "SHORT",
-
-                "qty":
-                contracts
-            }
-
-except Exception as e:
-    print("Position error:", e)
-
-return None
-```
-
-def close_position(position):
-
-```
-qty = position["qty"]
-
-try:
-
-    if position["side"] == "LONG":
-
-        exchange.create_market_sell_order(
-            SYMBOL,
-            qty,
-            params={
-                "tdMode": "isolated"
-            }
-        )
-
-    else:
-
-        exchange.create_market_buy_order(
-            SYMBOL,
-            qty,
-            params={
-                "tdMode": "isolated"
-            }
-        )
-
-    print("Position closed")
-
-except Exception as e:
-    print("Close error:", e)
-```
 
 def place_tp_sl(side, qty, sl, tp):
+    try:
+        params = {
+            "tdMode": "isolated",
+            "reduceOnly": True,
+            "stopLossPrice": round(sl, 2),
+            "takeProfitPrice": round(tp, 2)
+        }
 
-```
-try:
+        if side == "LONG":
+            exchange.create_market_sell_order(
+                SYMBOL,
+                qty,
+                params=params
+            )
+        else:
+            exchange.create_market_buy_order(
+                SYMBOL,
+                qty,
+                params=params
+            )
 
-    if side == "LONG":
+        print("SL/TP placed")
 
-        exchange.create_order(
-            SYMBOL,
-            "market",
-            "sell",
-            qty,
-            None,
-            {
-                "tdMode": "isolated",
-                "stopLossPrice": round(sl, 2),
-                "takeProfitPrice": round(tp, 2),
-                "reduceOnly": True
-            }
-        )
+    except Exception as e:
+        print("SL TP error:", e)
 
-    else:
-
-        exchange.create_order(
-            SYMBOL,
-            "market",
-            "buy",
-            qty,
-            None,
-            {
-                "tdMode": "isolated",
-                "stopLossPrice": round(sl, 2),
-                "takeProfitPrice": round(tp, 2),
-                "reduceOnly": True
-            }
-        )
-
-    print("SL/TP placed")
-
-except Exception as e:
-    print("SL TP error:", e)
-```
 
 def open_position(side, qty, sl, tp):
+    try:
+        params = {
+            "tdMode": "isolated"
+        }
 
-```
+        if side == "LONG":
+            exchange.create_market_buy_order(
+                SYMBOL,
+                qty,
+                params=params
+            )
+        else:
+            exchange.create_market_sell_order(
+                SYMBOL,
+                qty,
+                params=params
+            )
+
+        print("OPEN", side)
+
+        time.sleep(2)
+
+        place_tp_sl(side, qty, sl, tp)
+
+    except Exception as e:
+        print("Open error:", e)
+
+
 try:
+    exchange.set_leverage(
+        LEVERAGE,
+        SYMBOL,
+        params={"marginMode": "isolated"}
+    )
+except Exception as e:
+    print("Leverage warning:", e)
 
-    if side == "LONG":
 
-        exchange.create_market_buy_order(
-            SYMBOL,
-            qty,
-            params={
-                "tdMode": "isolated"
-            }
-        )
+try:
+    print("===== BTC BOT START =====")
 
+    df = fetch()
+    price = df["c"].iloc[-1]
+
+    print("TEST MODE ACTIVE")
+
+    sig = "LONG"
+    pos = get_position()
+
+    print("Signal:", sig)
+    print("Position:", pos)
+
+    sl = smart_stop(df, sig)
+    tp = smart_tp(price, sl, sig)
+    qty = position_size(price, sl)
+
+    print("SL:", round(sl, 2))
+    print("TP:", round(tp, 2))
+    print("Qty:", qty)
+
+    if pos is None:
+        open_position(sig, qty, sl, tp)
     else:
+        print("Position already open")
 
-        exchange.create_market_sell_order(
-            SYMBOL,
-            qty,
-            params={
-                "tdMode": "isolated"
-            }
-        )
-
-    print("OPEN", side)
-
-    time.sleep(2)
-
-    place_tp_sl(
-        side,
-        qty,
-        sl,
-        tp
-    )
+    print("===== DONE =====")
 
 except Exception as e:
-    print("Open error:", e)
-```
-
-try:
-
-```
-exchange.set_leverage(
-    LEVERAGE,
-    SYMBOL,
-    params={
-        "marginMode":
-        "isolated"
-    }
-)
-```
-
-except Exception as e:
-print("Leverage warning:", e)
-
-try:
-
-```
-print("===== BTC BOT START =====")
-
-df = fetch()
-price = df["c"].iloc[-1]
-
-# TEST MODE
-sig = "LONG"
-
-print("TEST MODE ACTIVE")
-
-pos = get_position()
-
-print("Signal:", sig)
-print("Position:", pos)
-
-sl = smart_stop(df, sig)
-tp = smart_tp(price, sl, sig)
-
-qty = position_size(price, sl)
-
-print("SL:", round(sl, 2))
-print("TP:", round(tp, 2))
-print("Qty:", qty)
-
-if pos is None:
-
-    open_position(
-        sig,
-        qty,
-        sl,
-        tp
-    )
-
-else:
-
-    print(
-        "Position already open"
-    )
-
-print("===== DONE =====")
-```
-
-except Exception as e:
-print("ERROR:", e)
+    print("ERROR:", e)
