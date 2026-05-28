@@ -3,18 +3,17 @@ import pandas as pd
 import numpy as np
 import datetime
 
-PAIR = "DYDX/USDT:USDT"
+PAIR = "BTC/USDT"
 TIMEFRAME = "1h"
 
 MONTHS_BACK = 12
 
-SL_PCT = 0.01
-RR = 1.8
+SL_PCT = 0.008   # BTC daha volatil → daha dar SL
+RR = 1.6
 FUTURE_BARS = 12
 
-exchange = ccxt.okx({
-    "enableRateLimit": True,
-    "options": {"defaultType": "swap"}
+exchange = ccxt.binance({
+    "enableRateLimit": True
 })
 
 
@@ -28,7 +27,7 @@ def fetch_data(symbol, timeframe):
     candles = []
 
     while since < now:
-        batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=500)
+        batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=1000)
         if not batch:
             break
 
@@ -42,70 +41,76 @@ def fetch_data(symbol, timeframe):
 
 
 # -------------------------
-# LIQUIDITY SWEEP
+# LIQUIDITY LEVELS
 # -------------------------
-def get_liquidity_levels(df, lookback=20):
-    highs = df["h"].rolling(lookback).max()
-    lows = df["l"].rolling(lookback).min()
-    return highs, lows
-
-
-# -------------------------
-# FVG DETECTION (SIMPLE)
-# -------------------------
-def has_fvg(df, i):
-    if i < 3:
-        return False
-
-    prev_high = df["h"].iloc[i-2]
-    next_low = df["l"].iloc[i]
-
-    return next_low > prev_high
+def get_levels(df, lookback=20):
+    return (
+        df["h"].rolling(lookback).max(),
+        df["l"].rolling(lookback).min()
+    )
 
 
 # -------------------------
-# SIGNAL ENGINE (PRO)
+# BTC TREND FILTER (IMPORTANT)
 # -------------------------
-def signal(df):
-    if len(df) < 100:
+def trend_filter(df):
+    ma50 = df["c"].rolling(50).mean()
+    ma200 = df["c"].rolling(200).mean()
+
+    if len(df) < 200:
         return None
 
-    highs, lows = get_liquidity_levels(df)
+    if ma50.iloc[-1] > ma200.iloc[-1]:
+        return "UP"
+    else:
+        return "DOWN"
+
+
+# -------------------------
+# SIGNAL ENGINE
+# -------------------------
+def signal(df):
+    if len(df) < 200:
+        return None
+
+    highs, lows = get_levels(df)
 
     i = len(df) - 1
 
     h = df["h"].iloc[i]
     l = df["l"].iloc[i]
     c = df["c"].iloc[i]
+    o = df["o"].iloc[i]
 
     liquidity_high = highs.iloc[i-1]
     liquidity_low = lows.iloc[i-1]
 
     # -------------------------
-    # SWEEP
+    # SWEEP (BTC ADAPTED)
     # -------------------------
     sweep_high = h > liquidity_high and c < liquidity_high
     sweep_low = l < liquidity_low and c > liquidity_low
 
     # -------------------------
-    # DISPLACEMENT
+    # DISPLACEMENT (LESS STRICT)
     # -------------------------
-    body = abs(c - df["o"].iloc[i])
+    body = abs(c - o)
     candle_range = h - l
-    displacement = candle_range > 0 and body / candle_range > 0.6
+
+    displacement = candle_range > 0 and (body / candle_range) > 0.5
 
     # -------------------------
-    # FVG FILTER
+    # TREND FILTER (BTC KEY EDGE)
     # -------------------------
-    fvg = has_fvg(df, i)
+    trend = trend_filter(df)
 
     # -------------------------
     # FINAL LOGIC
     # -------------------------
-    if sweep_low and displacement and fvg:
+    if trend == "UP" and sweep_low and displacement:
         return "LONG"
 
-    if sweep_high and displacement and fvg:
+    if trend == "DOWN" and sweep_high and displacement:
         return "SHORT"
 
     return None
@@ -117,7 +122,7 @@ def signal(df):
 def backtest(df):
     trades = []
 
-    for i in range(100, len(df) - FUTURE_BARS):
+    for i in range(200, len(df) - FUTURE_BARS):
 
         sub = df.iloc[:i]
         side = signal(sub)
@@ -147,10 +152,10 @@ def backtest(df):
                 if row["l"] <= sl:
                     break
             else:
-                if row["l"] <= tp:
+                if row["l"] >= tp:
                     result = True
                     break
-                if row["h"] >= sl:
+                if row["h"] <= sl:
                     break
 
         trades.append(result)
@@ -161,7 +166,7 @@ def backtest(df):
 # -------------------------
 # RUN
 # -------------------------
-print("===== DYDX V7 PRO REBUILD =====")
+print("===== BTC V7 PRO REPORT =====")
 df = fetch_data(PAIR, TIMEFRAME)
 
 if df.empty:
