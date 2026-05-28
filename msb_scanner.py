@@ -2,217 +2,176 @@ import ccxt
 import pandas as pd
 import numpy as np
 import time
+
 PAIRS = [
-"BTC/USDT",
-"ETH/USDT",
-"DYDX/USDT"
+    "BTC/USDT:USDT",
+    "ETH/USDT:USDT",
+    "DYDX/USDT:USDT"
 ]
-TIMEFRAMES = {
-"15m": 15 * 60 * 1000,
-"1h": 60 * 60 * 1000
-}
+
+TIMEFRAMES = ["15m", "1h"]
+
 MONTHS_BACK = 6
 PIVOT = 5
-OB_LOOKBACK = 20
 SL_PCT = 0.01
 RR = 1.2
-BATCH_LIMIT = 100
+LIMIT = 100
+
 exchange = ccxt.okx({
-"enableRateLimit": True,
-"options": {
-"defaultType": "swap"
-}
+    "enableRateLimit": True,
+    "options": {"defaultType": "swap"}
 })
-def fetch_real_history(symbol, tf):
-now_ms = exchange.milliseconds()
-months_ms = MONTHS_BACK * 30 * 24 * 60 * 60 * 1000
-since = now_ms - months_ms
-all_data = []
 
-while since < now_ms:
-    try:
-        batch = exchange.fetch_ohlcv(
-            symbol,
-            timeframe=tf,
-            since=since,
-            limit=BATCH_LIMIT
-        )
 
-        if not batch:
+def fetch_data(symbol, timeframe):
+    now_ms = exchange.milliseconds()
+    since = now_ms - (MONTHS_BACK * 30 * 24 * 60 * 60 * 1000)
+
+    candles = []
+
+    while since < now_ms:
+        try:
+            batch = exchange.fetch_ohlcv(
+                symbol,
+                timeframe=timeframe,
+                since=since,
+                limit=LIMIT
+            )
+
+            if not batch:
+                break
+
+            candles.extend(batch)
+
+            last_ts = batch[-1][0]
+
+            if last_ts <= since:
+                break
+
+            tf_ms = (
+                15 * 60 * 1000
+                if timeframe == "15m"
+                else 60 * 60 * 1000
+            )
+
+            since = last_ts + tf_ms
+
+            time.sleep(exchange.rateLimit / 1000)
+
+        except Exception as e:
+            print("FETCH ERROR:", symbol, timeframe, e)
             break
 
-        all_data.extend(batch)
+    if len(candles) == 0:
+        return pd.DataFrame()
 
-        last_ts = batch[-1][0]
+    df = pd.DataFrame(
+        candles,
+        columns=["ts", "o", "h", "l", "c", "v"]
+    )
 
-        if last_ts <= since:
-            break
+    df = df.drop_duplicates(subset=["ts"])
+    df = df.reset_index(drop=True)
 
-        since = last_ts + TIMEFRAMES[tf]
+    return df
 
-        time.sleep(exchange.rateLimit / 1000)
 
-    except Exception as e:
-        print("fetch error:", symbol, tf, e)
-        break
+def signal(df):
 
-if not all_data:
-    return pd.DataFrame()
+    if len(df) < 30:
+        return None
 
-df = pd.DataFrame(
-    all_data,
-    columns=["ts", "o", "h", "l", "c", "v"]
-)
+    highs = df["h"].values
+    lows = df["l"].values
+    close = df["c"].iloc[-1]
 
-df = df.drop_duplicates(subset=["ts"])
-df = df.reset_index(drop=True)
+    swing_highs = []
+    swing_lows = []
 
-return df
-def swings(df):
-highs = df["h"].values
-lows = df["l"].values
-swing_highs = []
-swing_lows = []
+    for i in range(PIVOT, len(df) - PIVOT):
 
-for i in range(PIVOT, len(df) - PIVOT):
+        if highs[i] == np.max(
+            highs[i - PIVOT:i + PIVOT + 1]
+        ):
+            swing_highs.append(highs[i])
 
-    if highs[i] == np.max(highs[i - PIVOT:i + PIVOT + 1]):
-        swing_highs.append((i, highs[i]))
+        if lows[i] == np.min(
+            lows[i - PIVOT:i + PIVOT + 1]
+        ):
+            swing_lows.append(lows[i])
 
-    if lows[i] == np.min(lows[i - PIVOT:i + PIVOT + 1]):
-        swing_lows.append((i, lows[i]))
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return None
 
-return swing_highs, swing_lows
-def choch(swing_highs, swing_lows):
-if len(swing_highs) < 2 or len(swing_lows) < 2:
+    sweep_high = close >= max(swing_highs[-2:])
+    sweep_low = close <= min(swing_lows[-2:])
+
+    trend_up = swing_lows[-1] > swing_lows[-2]
+    trend_down = swing_highs[-1] < swing_highs[-2]
+
+    if trend_up and sweep_low:
+        return "LONG"
+
+    if trend_down and sweep_high:
+        return "SHORT"
+
     return None
 
-if swing_highs[-1][1] < swing_highs[-2][1]:
-    return "DOWN"
 
-if swing_lows[-1][1] > swing_lows[-2][1]:
-    return "UP"
-
-return None
-def liquidity(close, swing_highs, swing_lows):
-if len(swing_highs) < 2 or len(swing_lows) < 2:
-    return False, False
-
-sweep_high = close >= max(x[1] for x in swing_highs[-2:])
-sweep_low = close <= min(x[1] for x in swing_lows[-2:])
-
-return sweep_high, sweep_low
-def order_block(df, idx):
-start = max(0, idx - OB_LOOKBACK)
-
-for i in range(idx, start, -1):
-
-    candle_range = df["h"].iloc[i] - df["l"].iloc[i]
-    body = abs(df["c"].iloc[i] - df["o"].iloc[i])
-
-    if candle_range == 0:
-        continue
-
-    if body / candle_range > 0.55:
-        return (
-            df["h"].iloc[i],
-            df["l"].iloc[i]
-        )
-
-return None
-def signal(sub):
-swing_highs, swing_lows = swings(sub)
-
-if len(swing_highs) < 2 or len(swing_lows) < 2:
-    return None
-
-trend = choch(swing_highs, swing_lows)
-
-if trend is None:
-    return None
-
-close = sub["c"].iloc[-1]
-
-sweep_high, sweep_low = liquidity(
-    close,
-    swing_highs,
-    swing_lows
-)
-
-ob = order_block(sub, len(sub) - 2)
-
-if ob is None:
-    return None
-
-ob_high, _ = ob
-
-risk = close * SL_PCT
-reward = abs(ob_high - close)
-
-rr_value = reward / risk if risk > 0 else 0
-
-if rr_value < RR:
-    return None
-
-if trend == "UP" and sweep_low:
-    return "LONG"
-
-if trend == "DOWN" and sweep_high:
-    return "SHORT"
-
-return None
 def backtest(df, tf):
-trades = []
 
-future_bars = 24 if tf == "15m" else 12
+    trades = []
 
-for i in range(80, len(df) - future_bars):
+    future_bars = 24 if tf == "15m" else 12
 
-    sub = df.iloc[:i]
+    for i in range(50, len(df) - future_bars):
 
-    side = signal(sub)
+        sub = df.iloc[:i]
 
-    if side is None:
-        continue
+        side = signal(sub)
 
-    entry = sub["c"].iloc[-1]
+        if side is None:
+            continue
 
-    if side == "LONG":
-        tp = entry * (1 + (SL_PCT * RR))
-        sl = entry * (1 - SL_PCT)
-    else:
-        tp = entry * (1 - (SL_PCT * RR))
-        sl = entry * (1 + SL_PCT)
-
-    future = df.iloc[i:i + future_bars]
-
-    result = False
-
-    for _, row in future.iterrows():
+        entry = sub["c"].iloc[-1]
 
         if side == "LONG":
-
-            if row["h"] >= tp:
-                result = True
-                break
-
-            if row["l"] <= sl:
-                break
-
+            tp = entry * (1 + (SL_PCT * RR))
+            sl = entry * (1 - SL_PCT)
         else:
+            tp = entry * (1 - (SL_PCT * RR))
+            sl = entry * (1 + SL_PCT)
 
-            if row["l"] <= tp:
-                result = True
-                break
+        result = False
 
-            if row["h"] >= sl:
-                break
+        future = df.iloc[i:i + future_bars]
 
-    trades.append(result)
+        for _, row in future.iterrows():
 
-return trades
-def run():
-print("===== REAL 6 MONTH PERFORMANCE REPORT =====")
+            if side == "LONG":
+
+                if row["h"] >= tp:
+                    result = True
+                    break
+
+                if row["l"] <= sl:
+                    break
+
+            else:
+
+                if row["l"] <= tp:
+                    result = True
+                    break
+
+                if row["h"] >= sl:
+                    break
+
+        trades.append(result)
+
+    return trades
+
+
+print("===== 6 MONTH PERFORMANCE REPORT =====")
 
 for tf in TIMEFRAMES:
 
@@ -220,9 +179,9 @@ for tf in TIMEFRAMES:
 
     for pair in PAIRS:
 
-        print(f"Loading {pair} {tf}...")
+        print("Loading", pair, tf)
 
-        df = fetch_real_history(pair, tf)
+        df = fetch_data(pair, tf)
 
         if df.empty:
             print(pair, "NO DATA")
@@ -238,12 +197,13 @@ for tf in TIMEFRAMES:
 
         wins = sum(results)
         losses = len(results) - wins
-        wr = round((wins / len(results)) * 100, 2)
+        wr = round(
+            (wins / len(results)) * 100,
+            2
+        )
 
         print(
             f"{pair} | Trades:{len(results)} "
             f"| Win:{wins} Loss:{losses} "
             f"| WR:{wr}%"
         )
-if name == "main":
-run()
