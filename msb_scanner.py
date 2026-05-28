@@ -1,13 +1,17 @@
 import requests
 import pandas as pd
-import numpy as np
+from datetime import datetime
 
-# =========================
+# ==========================
+# TELEGRAM AYARLARI
+# ==========================
+BOT_TOKEN = "8953905429:AAFAZRJ9d2u20wDD3F2BLU9-ThaWWiq4-A0"
+CHAT_ID = "1599636303"
+
+# ==========================
 # AYARLAR
-# =========================
+# ==========================
 TIMEFRAMES = {
-    "1m": "1m",
-    "5m": "5m",
     "15m": "15m",
     "1H": "1H",
     "4H": "4H",
@@ -18,16 +22,34 @@ LIMIT = 200
 ZIGZAG_LEN = 9
 
 
-# =========================
-# OKX PARITELERINI AL
-# =========================
+# ==========================
+# TELEGRAM MESAJ
+# ==========================
+def send_telegram_message(message):
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": message
+    }
+
+    requests.post(url, data=payload)
+
+
+# ==========================
+# OKX PARITELERI
+# ==========================
 def get_okx_pairs():
+
     url = "https://www.okx.com/api/v5/public/instruments?instType=SWAP"
+
     data = requests.get(url).json()
 
     pairs = []
 
     for x in data["data"]:
+
         inst_id = x["instId"]
 
         if "USDT" in inst_id:
@@ -36,10 +58,11 @@ def get_okx_pairs():
     return pairs
 
 
-# =========================
+# ==========================
 # CANDLE VERISI
-# =========================
+# ==========================
 def get_candles(symbol, timeframe):
+
     url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar={timeframe}&limit={LIMIT}"
 
     r = requests.get(url).json()
@@ -50,9 +73,15 @@ def get_candles(symbol, timeframe):
     rows = r["data"]
 
     df = pd.DataFrame(rows, columns=[
-        "ts", "open", "high", "low",
-        "close", "vol", "volCcy",
-        "volCcyQuote", "confirm"
+        "ts",
+        "open",
+        "high",
+        "low",
+        "close",
+        "vol",
+        "volCcy",
+        "volCcyQuote",
+        "confirm"
     ])
 
     df = df[::-1]
@@ -64,9 +93,9 @@ def get_candles(symbol, timeframe):
     return df
 
 
-# =========================
+# ==========================
 # BASIT MSB ANALIZI
-# =========================
+# ==========================
 def detect_msb(df):
 
     highs = df["high"].rolling(ZIGZAG_LEN).max()
@@ -89,10 +118,11 @@ def detect_msb(df):
     return None
 
 
-# =========================
+# ==========================
 # TARAYICI
-# =========================
+# ==========================
 def scan():
+
     pairs = get_okx_pairs()
 
     print("SCAN BASLADI...\n")
@@ -101,11 +131,10 @@ def scan():
 
         print(f"\n===== {tf_name} =====")
 
-        found = []
-
         for pair in pairs:
 
             try:
+
                 df = get_candles(pair, tf)
 
                 if df is None:
@@ -114,16 +143,25 @@ def scan():
                 signal = detect_msb(df)
 
                 if signal:
-                    found.append(f"{pair} -> {signal}")
 
-            except:
+                    saat = datetime.now().strftime("%H:%M")
+
+                    emoji = "🟢" if signal == "LONG" else "🔴"
+
+                    message = (
+                        f"{emoji} {signal}\n\n"
+                        f"Coin: {pair}\n"
+                        f"TF: {tf_name}\n"
+                        f"Saat: {saat}"
+                    )
+
+                    send_telegram_message(message)
+
+                    print(f"{pair} -> {signal}")
+
+            except Exception as e:
+                print(f"{pair} hata: {e}")
                 continue
-
-        if found:
-            for x in found:
-                print(x)
-        else:
-            print("Sinyal yok")
 
 
 if __name__ == "__main__":
