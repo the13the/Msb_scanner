@@ -21,9 +21,17 @@ TIMEFRAMES = {
 LIMIT = 200
 ZIGZAG_LEN = 9
 
+# Güç filtresi (%)
+STRENGTH_FILTER = {
+    "15m": 0.0015,   # %0.15
+    "1H": 0.0030,    # %0.30
+    "4H": 0.0060,    # %0.60
+    "1D": 0.0150     # %1.5 -> sert filtre
+}
+
 
 # ==========================
-# TELEGRAM MESAJ
+# TELEGRAM
 # ==========================
 def send_telegram_message(message):
 
@@ -53,7 +61,6 @@ def get_okx_pairs():
         pairs = []
 
         for item in response.get("data", []):
-
             inst_id = item.get("instId")
 
             if inst_id and "USDT" in inst_id:
@@ -110,9 +117,9 @@ def get_candles(symbol, timeframe):
 
 
 # ==========================
-# YENI MSB KONTROL
+# MSB + GÜÇ FILTRESI
 # ==========================
-def detect_msb(df):
+def detect_msb(df, tf_name):
 
     if df is None or len(df) < 30:
         return None
@@ -126,24 +133,35 @@ def detect_msb(df):
         current_price = df["close"].iloc[-1]
 
         previous_high = highs.iloc[-10]
-        current_high = highs.iloc[-1]
-
         previous_low = lows.iloc[-10]
-        current_low = lows.iloc[-1]
 
-        # Yeni LONG
+        filter_pct = STRENGTH_FILTER[tf_name]
+
+        # LONG güç kontrolü
+        long_strength = (
+            (current_price - previous_high)
+            / previous_high
+        )
+
+        # SHORT güç kontrolü
+        short_strength = (
+            (previous_low - current_price)
+            / previous_low
+        )
+
+        # LONG
         if (
-            current_high > previous_high
-            and current_price > previous_high
+            current_price > previous_high
             and prev_price <= previous_high
+            and long_strength >= filter_pct
         ):
             return "LONG"
 
-        # Yeni SHORT
+        # SHORT
         if (
-            current_low < previous_low
-            and current_price < previous_low
+            current_price < previous_low
             and prev_price >= previous_low
+            and short_strength >= filter_pct
         ):
             return "SHORT"
 
@@ -172,7 +190,7 @@ def scan():
 
                 df = get_candles(pair, tf)
 
-                signal = detect_msb(df)
+                signal = detect_msb(df, tf_name)
 
                 if not signal:
                     continue
