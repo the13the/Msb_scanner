@@ -1,11 +1,9 @@
 import requests
 import pandas as pd
 from datetime import datetime
-import json
-import os
 
 # ==========================
-# TELEGRAM AYARLARI
+# TELEGRAM
 # ==========================
 BOT_TOKEN = "8953905429:AAFAZRJ9d2u20wDD3F2BLU9-ThaWWiq4-A0"
 CHAT_ID = "1599636303"
@@ -22,42 +20,10 @@ TIMEFRAMES = {
 
 LIMIT = 200
 ZIGZAG_LEN = 9
-CACHE_FILE = "sent_signals.json"
 
 
 # ==========================
-# CACHE
-# ==========================
-def load_sent_signals():
-
-    if not os.path.exists(CACHE_FILE):
-        return {}
-
-    try:
-        with open(CACHE_FILE, "r") as f:
-            data = json.load(f)
-
-        # Eski bozuk format geldiyse sıfırla
-        if not isinstance(data, dict):
-            return {}
-
-        return data
-
-    except:
-        return {}
-
-
-def save_sent_signals(data):
-
-    try:
-        with open(CACHE_FILE, "w") as f:
-            json.dump(data, f)
-    except:
-        pass
-
-
-# ==========================
-# TELEGRAM
+# TELEGRAM MESAJ
 # ==========================
 def send_telegram_message(message):
 
@@ -84,11 +50,9 @@ def get_okx_pairs():
     try:
         response = requests.get(url, timeout=15).json()
 
-        data = response.get("data", [])
-
         pairs = []
 
-        for item in data:
+        for item in response.get("data", []):
 
             inst_id = item.get("instId")
 
@@ -146,11 +110,11 @@ def get_candles(symbol, timeframe):
 
 
 # ==========================
-# BASIT MSB
+# YENI MSB KONTROL
 # ==========================
 def detect_msb(df):
 
-    if df is None or len(df) < 20:
+    if df is None or len(df) < 30:
         return None
 
     try:
@@ -158,18 +122,29 @@ def detect_msb(df):
         highs = df["high"].rolling(ZIGZAG_LEN).max()
         lows = df["low"].rolling(ZIGZAG_LEN).min()
 
-        recent_high = highs.iloc[-1]
+        prev_price = df["close"].iloc[-2]
+        current_price = df["close"].iloc[-1]
+
         previous_high = highs.iloc[-10]
+        current_high = highs.iloc[-1]
 
-        recent_low = lows.iloc[-1]
         previous_low = lows.iloc[-10]
+        current_low = lows.iloc[-1]
 
-        price = df["close"].iloc[-1]
-
-        if recent_high > previous_high and price > previous_high:
+        # Yeni LONG
+        if (
+            current_high > previous_high
+            and current_price > previous_high
+            and prev_price <= previous_high
+        ):
             return "LONG"
 
-        if recent_low < previous_low and price < previous_low:
+        # Yeni SHORT
+        if (
+            current_low < previous_low
+            and current_price < previous_low
+            and prev_price >= previous_low
+        ):
             return "SHORT"
 
         return None
@@ -182,8 +157,6 @@ def detect_msb(df):
 # TARAYICI
 # ==========================
 def scan():
-
-    sent_signals = load_sent_signals()
 
     pairs = get_okx_pairs()
 
@@ -204,21 +177,6 @@ def scan():
                 if not signal:
                     continue
 
-                candle_time = str(df.iloc[-1]["ts"])
-
-                signal_key = (
-                    f"{pair}_"
-                    f"{tf_name}_"
-                    f"{signal}_"
-                    f"{candle_time}"
-                )
-
-                # Aynı mum tekrar gönderilmesin
-                if signal_key in sent_signals:
-                    continue
-
-                sent_signals[signal_key] = True
-
                 saat = datetime.now().strftime("%H:%M")
 
                 emoji = "🟢" if signal == "LONG" else "🔴"
@@ -236,8 +194,6 @@ def scan():
 
             except Exception as e:
                 print(f"{pair} hata: {e}")
-
-    save_sent_signals(sent_signals)
 
 
 if __name__ == "__main__":
