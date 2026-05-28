@@ -8,8 +8,11 @@ TIMEFRAME = "1h"
 
 MONTHS_BACK = 12
 
+PIVOT = 8
+LIMIT = 500
+
 SL_PCT = 0.01
-RR = 1.5
+RR = 1.4
 FUTURE_BARS = 12
 
 MIN_SWEEP_PCT = 0.003
@@ -31,11 +34,13 @@ def fetch_data(symbol, timeframe):
     candles = []
 
     while since < now:
-        batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=500)
+        batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=LIMIT)
+
         if not batch:
             break
 
         candles.extend(batch)
+
         last = batch[-1][0]
 
         if last <= since:
@@ -46,55 +51,71 @@ def fetch_data(symbol, timeframe):
     df = pd.DataFrame(candles, columns=["ts","o","h","l","c","v"])
     df.drop_duplicates(subset=["ts"], inplace=True)
     df.reset_index(drop=True, inplace=True)
+
     return df
 
 
 # -------------------------
-# STRUCTURE (REAL SWING BASED ON FRAGMENTS)
+# SESSION FILTER (KEEP)
 # -------------------------
-def get_structure(df):
+def is_trading_session(ts):
+    dt = datetime.datetime.utcfromtimestamp(ts / 1000)
+    return 12 <= dt.hour <= 20
+
+
+# -------------------------
+# CLEAN SWING (IMPORTANT FIX)
+# -------------------------
+def get_swings(df):
     highs = df["h"].values
     lows = df["l"].values
 
-    structure_highs = []
-    structure_lows = []
+    swing_highs = []
+    swing_lows = []
 
-    # daha sıkı structure detection
-    for i in range(3, len(df) - 3):
+    for i in range(PIVOT, len(df) - PIVOT):
 
-        if highs[i] > highs[i-1] and highs[i] > highs[i+1]:
-            structure_highs.append(highs[i])
+        window_high = highs[i-PIVOT:i+PIVOT+1]
+        window_low = lows[i-PIVOT:i+PIVOT+1]
 
-        if lows[i] < lows[i-1] and lows[i] < lows[i+1]:
-            structure_lows.append(lows[i])
+        # REAL swing (not micro noise)
+        if highs[i] == np.max(window_high):
+            swing_highs.append(highs[i])
 
-    return structure_highs, structure_lows
+        if lows[i] == np.min(window_low):
+            swing_lows.append(lows[i])
+
+    return swing_highs, swing_lows
 
 
 # -------------------------
-# SIGNAL ENGINE (V7 FIX)
+# SIGNAL ENGINE (STABLE)
 # -------------------------
 def signal(df):
     if len(df) < 150:
         return None
 
-    structure_highs, structure_lows = get_structure(df)
-
-    if len(structure_highs) < 3 or len(structure_lows) < 3:
+    # SESSION FILTER
+    if not is_trading_session(df["ts"].iloc[-1]):
         return None
 
-    last_high = structure_highs[-1]
-    prev_high = structure_highs[-2]
+    swing_highs, swing_lows = get_swings(df)
 
-    last_low = structure_lows[-1]
-    prev_low = structure_lows[-2]
+    if len(swing_highs) < 3 or len(swing_lows) < 3:
+        return None
+
+    last_high = swing_highs[-1]
+    prev_high = swing_highs[-2]
+
+    last_low = swing_lows[-1]
+    prev_low = swing_lows[-2]
 
     h = df["h"].iloc[-1]
     l = df["l"].iloc[-1]
     c = df["c"].iloc[-1]
 
     # -------------------------
-    # REAL SWEEP (LIQUIDITY GRAB)
+    # SWEEP (UNCHANGED BUT CLEAN)
     # -------------------------
     sweep_high = (
         h > last_high and
@@ -109,19 +130,13 @@ def signal(df):
     )
 
     # -------------------------
-    # TRUE BOS (BREAK OF STRUCTURE)
-    # -------------------------
-    bos_up = c > last_high
-    bos_down = c < last_low
-
-    # -------------------------
-    # STRUCTURE TREND
+    # TREND (STABLE VERSION)
     # -------------------------
     trend_up = last_low > prev_low
     trend_down = last_high < prev_high
 
     # -------------------------
-    # FINAL LOGIC (CLEAN VERSION)
+    # FINAL SIGNAL
     # -------------------------
     if trend_up and sweep_low:
         return "LONG"
@@ -182,7 +197,7 @@ def backtest(df):
 # -------------------------
 # RUN
 # -------------------------
-print("===== DYDX V7 FIX REPORT =====")
+print("===== DYDX V6.3 STABILIZED REPORT =====")
 print("Loading", PAIR, TIMEFRAME)
 
 df = fetch_data(PAIR, TIMEFRAME)
