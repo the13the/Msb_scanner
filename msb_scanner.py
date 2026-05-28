@@ -8,8 +8,8 @@ SYMBOL = "BTC/USDT:USDT"
 TIMEFRAME = "1h"
 
 LEVERAGE = 20
-RISK_PER_TRADE_USD = 2
-MAX_POSITION_USD = 20
+RISK_PER_TRADE_USD = 10
+MAX_POSITION_USD = 100
 RR = 1.8
 
 exchange = ccxt.okx({
@@ -32,6 +32,41 @@ def atr(df, period=14):
     lc = np.abs(df["l"] - df["c"].shift())
     tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
     return tr.rolling(period).mean()
+
+
+def trend(df):
+    ma50 = df["c"].rolling(50).mean()
+    ma200 = df["c"].rolling(200).mean()
+    return "LONG" if ma50.iloc[-1] > ma200.iloc[-1] else "SHORT"
+
+
+def signal(df):
+    if len(df) < 200:
+        return None
+
+    direction = trend(df)
+
+    highs = df["h"].rolling(20).max()
+    lows = df["l"].rolling(20).min()
+
+    i = len(df) - 1
+
+    c = df["c"].iloc[i]
+    h = df["h"].iloc[i]
+    l = df["l"].iloc[i]
+
+    last_high = highs.iloc[i - 1]
+    last_low = lows.iloc[i - 1]
+
+    if direction == "LONG":
+        if c > last_high and l <= last_high:
+            return "LONG"
+
+    if direction == "SHORT":
+        if c < last_low and h >= last_low:
+            return "SHORT"
+
+    return None
 
 
 def smart_stop(df, side):
@@ -61,9 +96,7 @@ def position_size(entry, sl):
     max_qty = MAX_POSITION_USD / entry
 
     qty = min(qty, max_qty)
-    qty = max(qty, 0.01)
-
-    return round(qty, 2)
+    return max(qty, 0.01)
 
 
 def get_position():
@@ -76,15 +109,31 @@ def get_position():
                     "side": "LONG" if p["side"].lower() == "long" else "SHORT",
                     "qty": float(p["contracts"])
                 }
-
     except Exception as e:
         print("Position error:", e)
 
     return None
 
 
-def place_sl_tp(side, qty, sl, tp):
+def close_position(position):
+    qty = position["qty"]
+
     try:
+        if position["side"] == "LONG":
+            exchange.create_market_sell_order(SYMBOL, qty, {"tdMode": "isolated"})
+        else:
+            exchange.create_market_buy_order(SYMBOL, qty, {"tdMode": "isolated"})
+    except Exception as e:
+        print("Close error:", e)
+
+
+# =========================
+# FIXED OKX SL/TP (ALGO)
+# =========================
+def place_sl_tp(side, qty, sl, tp):
+
+    try:
+
         params = {
             "tdMode": "isolated",
             "attachAlgoOrds": [
@@ -105,33 +154,33 @@ def place_sl_tp(side, qty, sl, tp):
         print("SL/TP ATTACHED OKX ALGO")
 
     except Exception as e:
-        print("SL/TP ERROR:", e)
+        print("SL/TP error:", e)
 
 
 def open_position(side, qty, sl, tp):
-    try:
-        params = {"tdMode": "isolated"}
 
+    try:
         if side == "LONG":
-            exchange.create_market_buy_order(SYMBOL, qty, params)
+            exchange.create_market_buy_order(SYMBOL, qty, {"tdMode": "isolated"})
         else:
-            exchange.create_market_sell_order(SYMBOL, qty, params)
+            exchange.create_market_sell_order(SYMBOL, qty, {"tdMode": "isolated"})
 
         print("OPEN", side)
+
         time.sleep(2)
 
         place_sl_tp(side, qty, sl, tp)
 
     except Exception as e:
-        print("OPEN ERROR:", e)
+        print("Open error:", e)
 
+
+# =========================
+# MAIN
+# =========================
 
 try:
-    exchange.set_leverage(
-        LEVERAGE,
-        SYMBOL,
-        params={"marginMode": "isolated"}
-    )
+    exchange.set_leverage(LEVERAGE, SYMBOL, params={"marginMode": "isolated"})
 except Exception as e:
     print("Leverage warning:", e)
 
@@ -142,25 +191,33 @@ try:
     df = fetch()
     price = df["c"].iloc[-1]
 
-    sig = "LONG"  # TEST MODE
-
+    sig = signal(df)
     pos = get_position()
 
     print("Signal:", sig)
     print("Position:", pos)
 
-    sl = smart_stop(df, sig)
-    tp = smart_tp(price, sl, sig)
-    qty = position_size(price, sl)
+    if sig:
 
-    print("SL:", round(sl, 2))
-    print("TP:", round(tp, 2))
-    print("Qty:", qty)
+        sl = smart_stop(df, sig)
+        tp = smart_tp(price, sl, sig)
+        qty = position_size(price, sl)
 
-    if pos is None:
-        open_position(sig, qty, sl, tp)
-    else:
-        print("Position already open")
+        print("SL:", round(sl, 2))
+        print("TP:", round(tp, 2))
+        print("Qty:", round(qty, 4))
+
+        if pos is None:
+            open_position(sig, qty, sl, tp)
+
+        elif pos["side"] != sig:
+            print("FLIP:", pos["side"], "->", sig)
+            close_position(pos)
+            time.sleep(2)
+            open_position(sig, qty, sl, tp)
+
+        else:
+            print("Same position")
 
     print("===== DONE =====")
 
