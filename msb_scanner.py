@@ -14,11 +14,11 @@ ATR_LEN = 14
 SL_ATR_MULT = 1.2
 RR = 2.2
 
-DISP_ATR = 1.5
-
 SWEEP_WINDOW = 5
-DISP_WINDOW = 5
+DISPLACEMENT_WINDOW = 5
 FVG_WINDOW = 5
+
+DISP_ATR = 1.5
 
 FEE = 0.0004
 SLIPPAGE = 0.0002
@@ -36,17 +36,17 @@ def fetch_data(symbol, timeframe):
     now = exchange.milliseconds()
     since = now - MONTHS_BACK * 30 * 24 * 60 * 60 * 1000
 
-    data = []
+    all_data = []
     tf_ms = 60 * 60 * 1000
 
     while since < now:
         batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=LIMIT)
         if not batch:
             break
-        data.extend(batch)
+        all_data.extend(batch)
         since = batch[-1][0] + tf_ms
 
-    df = pd.DataFrame(data, columns=["ts","o","h","l","c","v"])
+    df = pd.DataFrame(all_data, columns=["ts","o","h","l","c","v"])
     df.drop_duplicates("ts", inplace=True)
     df.reset_index(drop=True, inplace=True)
     return df
@@ -69,9 +69,12 @@ def atr(df, length=14):
 
 
 # =========================
-# SWINGS
+# SWINGS (SAFE)
 # =========================
 def swings(df):
+    if len(df) < PIVOT * 2 + 10:
+        return [], []
+
     highs = df["h"].values
     lows = df["l"].values
 
@@ -87,14 +90,14 @@ def swings(df):
 
 
 # =========================
-# DISPLACEMENT CHECK
+# DISPLACEMENT
 # =========================
 def displacement(candle, atr_val):
     return abs(candle["c"] - candle["o"]) > atr_val * DISP_ATR
 
 
 # =========================
-# FVG DETECTION
+# FVG
 # =========================
 def detect_fvg(df, i):
     if i < 2:
@@ -105,6 +108,7 @@ def detect_fvg(df, i):
 
     if c1["h"] < c3["l"]:
         return "bull"
+
     if c1["l"] > c3["h"]:
         return "bear"
 
@@ -112,34 +116,7 @@ def detect_fvg(df, i):
 
 
 # =========================
-# STATE MACHINE
-# =========================
-def generate_events(df, i, atr_val, last_sh, last_sl):
-
-    candle = df.iloc[i]
-
-    sweep = None
-    disp = False
-    fvg = None
-
-    # 1. SWEEP
-    if candle["l"] < last_sl:
-        sweep = "LONG"
-    if candle["h"] > last_sh:
-        sweep = "SHORT"
-
-    # 2. DISPLACEMENT
-    if displacement(candle, atr_val):
-        disp = True
-
-    # 3. FVG
-    fvg = detect_fvg(df, i)
-
-    return sweep, disp, fvg
-
-
-# =========================
-# BACKTEST
+# BACKTEST (STATE MACHINE)
 # =========================
 def backtest(df):
 
@@ -157,81 +134,98 @@ def backtest(df):
 
     sh, sl = swings(df)
 
+    if len(sh) == 0 or len(sl) == 0:
+        return [], []
+
     i = 120
 
     while i < len(df) - future_bars:
 
         atr_val = df["atr"].iloc[i]
+
         if np.isnan(atr_val):
             i += 1
             continue
 
-        last_sh = sh[-1]
-        last_sl = sl[-1]
+        # safety swing access
+        last_sh = sh[-1] if sh else None
+        last_sl = sl[-1] if sl else None
+
+        if last_sh is None or last_sl is None:
+            i += 1
+            continue
 
         candle = df.iloc[i]
 
-        sweep, disp, fvg = generate_events(df, i, atr_val, last_sh, last_sl)
+        sweep = None
+        disp = False
+        fvg = detect_fvg(df, i)
 
         # =========================
-        # STATE 0 → WAIT SWEEP
+        # 1. SWEEP DETECTION
+        # =========================
+        if candle["l"] < last_sl:
+            sweep = "LONG"
+
+        elif candle["h"] > last_sh:
+            sweep = "SHORT"
+
+        # =========================
+        # STATE 0
         # =========================
         if state is None:
 
-            if sweep == "LONG":
-                state = "sweep_long"
-                direction = "LONG"
-                setup_i = i
-
-            elif sweep == "SHORT":
-                state = "sweep_short"
-                direction = "SHORT"
+            if sweep:
+                state = "sweep"
+                direction = sweep
                 setup_i = i
 
             i += 1
             continue
 
         # =========================
-        # STATE 1 → WAIT DISPLACEMENT
+        # STATE 1: DISPLACEMENT
         # =========================
-        if state in ["sweep_long", "sweep_short"]:
-
-            if i - setup_i > SWEEP_WINDOW:
-                state = None
-                i += 1
-                continue
-
-            if disp:
-                state = "displacement"
-            i += 1
-            continue
-
-        # =========================
-        # STATE 2 → WAIT FVG
-        # =========================
-        if state == "displacement":
+        if state == "sweep":
 
             if i - setup_i > DISPLACEMENT_WINDOW:
                 state = None
                 i += 1
                 continue
 
-            if fvg is not None:
-                state = "ready"
+            if displacement(candle, atr_val):
+                state = "disp"
+
             i += 1
             continue
 
         # =========================
-        # STATE 3 → ENTRY (RETRACE)
+        # STATE 2: FVG
+        # =========================
+        if state == "disp":
+
+            if i - setup_i > FVG_WINDOW:
+                state = None
+                i += 1
+                continue
+
+            if fvg is not None:
+                state = "ready"
+
+            i += 1
+            continue
+
+        # =========================
+        # STATE 3: ENTRY
         # =========================
         if state == "ready":
 
             entry_idx = i + 1
+
             if entry_idx >= len(df):
                 break
 
             entry = df["o"].iloc[entry_idx]
-            atr_val = df["atr"].iloc[i]
 
             sl_dist = atr_val * SL_ATR_MULT
 
@@ -288,7 +282,7 @@ def backtest(df):
 # =========================
 # RUN
 # =========================
-print("===== DYDX V6 STATE MACHINE REPORT =====")
+print("===== DYDX V6 FIXED STATE MACHINE REPORT =====")
 
 df = fetch_data(PAIR, TIMEFRAME)
 
