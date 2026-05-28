@@ -8,21 +8,19 @@ TIMEFRAME = "1h"
 MONTHS_BACK = 12
 
 SL_PCT = 0.008
-RR = 1.6
+RR = 1.8
 FUTURE_BARS = 12
 
 LOOKBACK = 20
 
 exchange = ccxt.okx({
     "enableRateLimit": True,
-    "options": {
-        "defaultType": "spot"
-    }
+    "options": {"defaultType": "spot"}
 })
 
 
 # -------------------------
-# DATA FETCH (SAFE OKX VERSION)
+# DATA
 # -------------------------
 def fetch_data(symbol, timeframe):
     now = exchange.milliseconds()
@@ -31,24 +29,12 @@ def fetch_data(symbol, timeframe):
     candles = []
 
     while since < now:
-        try:
-            batch = exchange.fetch_ohlcv(
-                symbol,
-                timeframe=timeframe,
-                since=since,
-                limit=500
-            )
-
-            if not batch:
-                break
-
-            candles.extend(batch)
-
-            since = batch[-1][0] + 60 * 60 * 1000
-
-        except Exception as e:
-            print("FETCH ERROR:", e)
+        batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=500)
+        if not batch:
             break
+
+        candles.extend(batch)
+        since = batch[-1][0] + 60 * 60 * 1000
 
     df = pd.DataFrame(candles, columns=["ts","o","h","l","c","v"])
     df.drop_duplicates(subset=["ts"], inplace=True)
@@ -58,16 +44,7 @@ def fetch_data(symbol, timeframe):
 
 
 # -------------------------
-# LIQUIDITY LEVELS
-# -------------------------
-def liquidity(df):
-    high = df["h"].rolling(LOOKBACK).max()
-    low = df["l"].rolling(LOOKBACK).min()
-    return high, low
-
-
-# -------------------------
-# TREND FILTER (BTC CORE EDGE)
+# TREND (HTF BIAS)
 # -------------------------
 def trend(df):
     if len(df) < 200:
@@ -76,57 +53,56 @@ def trend(df):
     ma50 = df["c"].rolling(50).mean()
     ma200 = df["c"].rolling(200).mean()
 
-    if ma50.iloc[-1] > ma200.iloc[-1]:
-        return "UP"
-    else:
-        return "DOWN"
+    return "UP" if ma50.iloc[-1] > ma200.iloc[-1] else "DOWN"
 
 
 # -------------------------
-# SIGNAL ENGINE
+# SWING LEVELS (STRUCTURE)
+# -------------------------
+def structure_levels(df):
+    highs = df["h"].rolling(LOOKBACK).max()
+    lows = df["l"].rolling(LOOKBACK).min()
+    return highs, lows
+
+
+# -------------------------
+# SIGNAL ENGINE (CONTINUATION)
 # -------------------------
 def signal(df):
     if len(df) < 200:
         return None
 
-    highs, lows = liquidity(df)
+    tr = trend(df)
+    highs, lows = structure_levels(df)
 
     i = len(df) - 1
 
     h = df["h"].iloc[i]
     l = df["l"].iloc[i]
     c = df["c"].iloc[i]
-    o = df["o"].iloc[i]
 
-    liq_high = highs.iloc[i-1]
-    liq_low = lows.iloc[i-1]
-
-    # -------------------------
-    # SWEEP LOGIC
-    # -------------------------
-    sweep_high = h > liq_high and c < liq_high
-    sweep_low = l < liq_low and c > liq_low
+    last_high = highs.iloc[i-1]
+    last_low = lows.iloc[i-1]
 
     # -------------------------
-    # DISPLACEMENT (momentum candle)
+    # BOS (BREAK OF STRUCTURE)
     # -------------------------
-    body = abs(c - o)
-    rng = h - l
-
-    displacement = rng > 0 and (body / rng) > 0.5
+    bos_up = c > last_high
+    bos_down = c < last_low
 
     # -------------------------
-    # TREND
+    # RETEST LOGIC (ENTRY EDGE)
     # -------------------------
-    tr = trend(df)
+    retest_high = (l <= last_high) and (c > last_high)
+    retest_low = (h >= last_low) and (c < last_low)
 
     # -------------------------
-    # FINAL SIGNAL
+    # FINAL LOGIC
     # -------------------------
-    if tr == "UP" and sweep_low and displacement:
+    if tr == "UP" and bos_up and retest_high:
         return "LONG"
 
-    if tr == "DOWN" and sweep_high and displacement:
+    if tr == "DOWN" and bos_down and retest_low:
         return "SHORT"
 
     return None
@@ -168,10 +144,10 @@ def backtest(df):
                 if row["l"] <= sl:
                     break
             else:
-                if row["l"] <= tp:
+                if row["l"] >= tp:
                     result = True
                     break
-                if row["h"] >= sl:
+                if row["h"] <= sl:
                     break
 
         trades.append(result)
@@ -182,7 +158,7 @@ def backtest(df):
 # -------------------------
 # RUN
 # -------------------------
-print("===== BTC V7 PRO FULL FIXED =====")
+print("===== BTC V8 CONTINUATION ENGINE =====")
 
 df = fetch_data(PAIR, TIMEFRAME)
 
