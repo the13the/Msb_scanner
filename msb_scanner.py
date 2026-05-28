@@ -24,15 +24,17 @@ LIMIT = 200
 ZIGZAG_LEN = 9
 CACHE_FILE = "sent_signals.json"
 
-
 # ==========================
-# CACHE YUKLE
+# CACHE
 # ==========================
 def load_sent_signals():
 
     if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, "r") as f:
-            return json.load(f)
+        try:
+            with open(CACHE_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return {}
 
     return {}
 
@@ -44,7 +46,7 @@ def save_sent_signals(data):
 
 
 # ==========================
-# TELEGRAM
+# TELEGRAM MESAJ
 # ==========================
 def send_telegram_message(message):
 
@@ -65,15 +67,15 @@ def get_okx_pairs():
 
     url = "https://www.okx.com/api/v5/public/instruments?instType=SWAP"
 
-    data = requests.get(url).json()
+    response = requests.get(url).json()
 
     pairs = []
 
-    for x in data["data"]:
+    for x in response.get("data", []):
 
-        inst_id = x["instId"]
+        inst_id = x.get("instId")
 
-        if "USDT" in inst_id:
+        if inst_id and "USDT" in inst_id:
             pairs.append(inst_id)
 
     return pairs
@@ -86,12 +88,12 @@ def get_candles(symbol, timeframe):
 
     url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar={timeframe}&limit={LIMIT}"
 
-    r = requests.get(url).json()
+    response = requests.get(url).json()
 
-    if "data" not in r:
+    rows = response.get("data", [])
+
+    if len(rows) == 0:
         return None
-
-    rows = r["data"]
 
     df = pd.DataFrame(rows, columns=[
         "ts",
@@ -105,7 +107,7 @@ def get_candles(symbol, timeframe):
         "confirm"
     ])
 
-    df = df[::-1]
+    df = df[::-1].reset_index(drop=True)
 
     df["high"] = df["high"].astype(float)
     df["low"] = df["low"].astype(float)
@@ -118,6 +120,9 @@ def get_candles(symbol, timeframe):
 # BASIT MSB
 # ==========================
 def detect_msb(df):
+
+    if len(df) < 20:
+        return None
 
     highs = df["high"].rolling(ZIGZAG_LEN).max()
     lows = df["low"].rolling(ZIGZAG_LEN).min()
@@ -140,7 +145,7 @@ def detect_msb(df):
 
 
 # ==========================
-# TARAMA
+# TARAYICI
 # ==========================
 def scan():
 
@@ -165,31 +170,37 @@ def scan():
 
                 signal = detect_msb(df)
 
-                if signal:
+                if not signal:
+                    continue
 
-                    candle_time = str(df["ts"].iloc[-1])
+                candle_time = str(df.iloc[-1]["ts"])
 
-                    signal_key = f"{pair}_{tf_name}_{signal}_{candle_time}"
+                signal_key = (
+                    f"{pair}_"
+                    f"{tf_name}_"
+                    f"{signal}_"
+                    f"{candle_time}"
+                )
 
-                    if signal_key in sent_signals:
-                        continue
+                if signal_key in sent_signals:
+                    continue
 
-                    sent_signals[signal_key] = True
+                sent_signals[signal_key] = True
 
-                    saat = datetime.now().strftime("%H:%M")
+                saat = datetime.now().strftime("%H:%M")
 
-                    emoji = "🟢" if signal == "LONG" else "🔴"
+                emoji = "🟢" if signal == "LONG" else "🔴"
 
-                    message = (
-                        f"{emoji} {signal}\n\n"
-                        f"Coin: {pair}\n"
-                        f"TF: {tf_name}\n"
-                        f"Saat: {saat}"
-                    )
+                message = (
+                    f"{emoji} {signal}\n\n"
+                    f"Coin: {pair}\n"
+                    f"TF: {tf_name}\n"
+                    f"Saat: {saat}"
+                )
 
-                    send_telegram_message(message)
+                send_telegram_message(message)
 
-                    print(f"{pair} -> {signal}")
+                print(f"{pair} -> {signal}")
 
             except Exception as e:
                 print(f"{pair} hata: {e}")
