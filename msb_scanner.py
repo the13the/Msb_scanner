@@ -9,11 +9,12 @@ MONTHS_BACK = 3
 LIMIT = 500
 
 PIVOT = 6
-MIN_SWEEP_PCT = 0.002
-
 ATR_LEN = 14
+
 SL_ATR_MULT = 1.2
-RR = 1.5
+RR = 2.0
+
+CONFIRM_BARS = 3
 
 FEE = 0.0004
 SLIPPAGE = 0.0002
@@ -23,10 +24,9 @@ exchange = ccxt.okx({
     "options": {"defaultType": "swap"}
 })
 
-
-# ==========================
-# DATA FETCH
-# ==========================
+# =========================
+# DATA
+# =========================
 def fetch_data(symbol, timeframe):
     now = exchange.milliseconds()
     since = now - MONTHS_BACK * 30 * 24 * 60 * 60 * 1000
@@ -36,31 +36,20 @@ def fetch_data(symbol, timeframe):
 
     while since < now:
         batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=LIMIT)
-
         if not batch:
             break
-
         all_candles.extend(batch)
-        last = batch[-1][0]
+        since = batch[-1][0] + tf_ms
 
-        if last <= since:
-            break
-
-        since = last + tf_ms
-
-    if not all_candles:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(all_candles, columns=["ts", "o", "h", "l", "c", "v"])
+    df = pd.DataFrame(all_candles, columns=["ts","o","h","l","c","v"])
     df.drop_duplicates("ts", inplace=True)
     df.reset_index(drop=True, inplace=True)
-
     return df
 
 
-# ==========================
-# ATR CALC
-# ==========================
+# =========================
+# ATR
+# =========================
 def atr(df, length=14):
     high = df["h"]
     low = df["l"]
@@ -68,96 +57,134 @@ def atr(df, length=14):
 
     tr = np.maximum(
         high - low,
-        np.maximum(
-            abs(high - close.shift(1)),
-            abs(low - close.shift(1))
-        )
+        np.maximum(abs(high - close.shift(1)), abs(low - close.shift(1)))
     )
 
     return tr.rolling(length).mean()
 
 
-# ==========================
-# SIGNAL
-# ==========================
-def signal(df):
-    if len(df) < 100:
-        return None
-
+# =========================
+# SWING POINTS
+# =========================
+def swings(df):
     highs = df["h"].values
     lows = df["l"].values
-    close = df["c"].iloc[-1]
 
-    swing_highs = []
-    swing_lows = []
+    sh = []
+    sl = []
 
     for i in range(PIVOT, len(df) - PIVOT):
         if highs[i] == np.max(highs[i-PIVOT:i+PIVOT+1]):
-            swing_highs.append(highs[i])
-
+            sh.append((i, highs[i]))
         if lows[i] == np.min(lows[i-PIVOT:i+PIVOT+1]):
-            swing_lows.append(lows[i])
+            sl.append((i, lows[i]))
 
-    if len(swing_highs) < 3 or len(swing_lows) < 3:
+    return sh, sl
+
+
+# =========================
+# FVG DETECTION (simple 3-candle imbalance)
+# =========================
+def find_fvg(df, i):
+    if i < 2:
         return None
 
-    last_high = max(swing_highs[-2:])
-    last_low = min(swing_lows[-2:])
+    c1 = df.iloc[i-2]
+    c3 = df.iloc[i]
 
-    # TRUE SWEEP (wick + rejection)
-    sweep_high = (
-        df["h"].iloc[-1] > last_high and
-        df["c"].iloc[-1] < last_high and
-        (df["h"].iloc[-1] - last_high) / last_high > MIN_SWEEP_PCT
-    )
+    # bullish FVG
+    if c1["h"] < c3["l"]:
+        return ("bull", c1["h"], c3["l"])
 
-    sweep_low = (
-        df["l"].iloc[-1] < last_low and
-        df["c"].iloc[-1] > last_low and
-        (last_low - df["l"].iloc[-1]) / last_low > MIN_SWEEP_PCT
-    )
+    # bearish FVG
+    if c1["l"] > c3["h"]:
+        return ("bear", c3["h"], c1["l"])
 
-    trend_up = swing_lows[-1] > swing_lows[-2] > swing_lows[-3]
-    trend_down = swing_highs[-1] < swing_highs[-2] < swing_highs[-3]
+    return None
 
-    if trend_up and sweep_low:
+
+# =========================
+# MSS CHECK
+# =========================
+def mss_bull(df, last_swing_high):
+    return df["c"].iloc[-1] > last_swing_high
+
+def mss_bear(df, last_swing_low):
+    return df["c"].iloc[-1] < last_swing_low
+
+
+# =========================
+# SIGNAL ENGINE
+# =========================
+def signal(df):
+    if len(df) < 120:
+        return None
+
+    sh, sl = swings(df)
+
+    if len(sh) < 3 or len(sl) < 3:
+        return None
+
+    last_sh = sh[-1][1]
+    last_sl = sl[-1][1]
+
+    price = df["c"].iloc[-1]
+
+    # LIQUIDITY SWEEP (wick based)
+    sweep_low = df["l"].iloc[-1] < last_sl
+    sweep_high = df["h"].iloc[-1] > last_sh
+
+    # MSS confirmation
+    bull_mss = mss_bull(df, last_sh)
+    bear_mss = mss_bear(df, last_sl)
+
+    # FVG
+    fvg = find_fvg(df, len(df)-1)
+
+    if sweep_low and bull_mss and fvg and fvg[0] == "bull":
         return "LONG"
 
-    if trend_down and sweep_high:
+    if sweep_high and bear_mss and fvg and fvg[0] == "bear":
         return "SHORT"
 
     return None
 
 
-# ==========================
+# =========================
 # BACKTEST
-# ==========================
+# =========================
 def backtest(df):
     df["atr"] = atr(df, ATR_LEN)
 
     trades = []
     equity = 1.0
     curve = [equity]
-    peak = equity
-    max_dd = 0
 
     future_bars = 12
 
-    for i in range(100, len(df) - future_bars):
+    i = 120
+
+    while i < len(df) - future_bars:
 
         sub = df.iloc[:i]
         side = signal(sub)
 
         if side is None:
+            i += 1
             continue
 
         atr_val = sub["atr"].iloc[-1]
         if np.isnan(atr_val):
+            i += 1
             continue
 
-        entry = df["o"].iloc[i]  # NEXT CANDLE OPEN (FIXED)
+        # WAIT CONFIRMATION (important V3 logic)
+        entry_idx = i + CONFIRM_BARS
+        if entry_idx >= len(df):
+            break
 
-        # SL / TP
+        entry = df["o"].iloc[entry_idx]
+
         sl_dist = atr_val * SL_ATR_MULT
 
         if side == "LONG":
@@ -167,13 +194,12 @@ def backtest(df):
             sl = entry + sl_dist
             tp = entry - sl_dist * RR
 
-        future = df.iloc[i:i+future_bars]
+        future = df.iloc[entry_idx:entry_idx+future_bars]
 
         result = None
 
         for _, row in future.iterrows():
 
-            # SL FIRST (REALISTIC PRIORITY)
             if side == "LONG":
                 if row["l"] <= sl:
                     result = -1
@@ -190,30 +216,28 @@ def backtest(df):
                     break
 
         if result is None:
+            i += 1
             continue
 
-        # FEES + SLIPPAGE
-        pnl = result * (sl_dist / entry)
+        r = result * (sl_dist / entry)
 
-        pnl -= FEE * 2
-        pnl -= SLIPPAGE
+        r -= FEE * 2
+        r -= SLIPPAGE
 
-        equity *= (1 + pnl)
+        equity *= (1 + r)
         curve.append(equity)
-
-        peak = max(peak, equity)
-        dd = (peak - equity) / peak
-        max_dd = max(max_dd, dd)
 
         trades.append(result > 0)
 
-    return trades, curve, max_dd
+        i += CONFIRM_BARS + 1
+
+    return trades, curve
 
 
-# ==========================
+# =========================
 # RUN
-# ==========================
-print("===== DYDX V2 REPORT =====")
+# =========================
+print("===== DYDX V3 INSTITUTIONAL REPORT =====")
 
 df = fetch_data(PAIR, TIMEFRAME)
 
@@ -223,21 +247,16 @@ if df.empty:
 
 print("Candles:", len(df))
 
-results, curve, max_dd = backtest(df)
+trades, curve = backtest(df)
 
-if not results:
+if not trades:
     print("NO SIGNAL")
 else:
-    wins = sum(results)
-    losses = len(results) - wins
+    wins = sum(trades)
+    losses = len(trades) - wins
 
-    wr = round(wins / len(results) * 100, 2)
+    wr = round(wins / len(trades) * 100, 2)
 
-    print(
-        f"{PAIR} | Trades:{len(results)} "
-        f"| Win:{wins} Loss:{losses} "
-        f"| WR:{wr}%"
-    )
-
-    print(f"Max Drawdown: {round(max_dd*100, 2)}%")
-    print(f"Final Equity: {round(curve[-1], 3)}")
+    final = curve[-1]
+    print(f"Trades:{len(trades)} | Win:{wins} Loss:{losses} | WR:{wr}%")
+    print(f"Final Equity: {round(final,3)}")
