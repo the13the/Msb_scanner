@@ -1,91 +1,34 @@
 import ccxt
 import pandas as pd
 import numpy as np
-import requests
-import os
-import json
-import time
-from datetime import datetime
-
-# =========================
-# ENV
-# =========================
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID        = os.environ.get("CHAT_ID")
 
 # =========================
 # CONFIG
 # =========================
-CANDLE_COUNT = 250
-PIVOT_LEN    = 5
-OB_LOOKBACK  = 20
-STATE_FILE   = "state.json"
+TIMEFRAME = "1h"
+DAYS_BACK = 7
+CANDLES = DAYS_BACK * 24
 
-TIMEFRAMES = {
-    "15m": "15m",
-    "1h": "1h",
-    "4h": "4h"
-}
+TP = 0.02   # +2%
+SL = 0.01   # -1%
 
 PAIRS = [
     "BTC/USDT:USDT","ETH/USDT:USDT","SOL/USDT:USDT",
-    "XRP/USDT:USDT","ADA/USDT:USDT","AVAX/USDT:USDT",
-    "DOGE/USDT:USDT","LINK/USDT:USDT","TON/USDT:USDT",
-    "DOT/USDT:USDT","TRX/USDT:USDT","MATIC/USDT:USDT",
-    "LTC/USDT:USDT","BCH/USDT:USDT","ATOM/USDT:USDT",
-    "NEAR/USDT:USDT","ARB/USDT:USDT","OP/USDT:USDT",
-    "INJ/USDT:USDT","APT/USDT:USDT"
+    "XRP/USDT:USDT","ADA/USDT:USDT","AVAX/USDT:USDT"
 ]
 
-# =========================
-# STATE
-# =========================
-def load_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            return json.load(open(STATE_FILE))
-        except:
-            return {}
-    return {}
+PIVOT_LEN = 5
+OB_LOOKBACK = 20
 
-def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
+ex = ccxt.okx({"options": {"defaultType": "swap"}})
 
 # =========================
-# TELEGRAM
-# =========================
-def send(msg):
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("Telegram ENV eksik")
-        return
+def fetch(symbol):
+    df = ex.fetch_ohlcv(symbol, TIMEFRAME, limit=CANDLES)
+    return pd.DataFrame(df, columns=["t","o","h","l","c","v"])
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-
-    try:
-        requests.post(url, data={"chat_id": CHAT_ID, "text": msg}, timeout=10)
-    except Exception as e:
-        print("Telegram error:", e)
-
-# =========================
-# DATA
-# =========================
-def fetch(exchange, symbol, tf):
-    try:
-        data = exchange.fetch_ohlcv(symbol, tf, limit=CANDLE_COUNT)
-        time.sleep(0.12)
-        return pd.DataFrame(data, columns=["t","o","h","l","c","v"])
-    except Exception as e:
-        print("fetch error:", symbol, tf, e)
-        return pd.DataFrame()
-
-# =========================
-# SWINGS
 # =========================
 def swings(df):
-    if df.empty:
-        return [], []
-
     h = df["h"].values
     l = df["l"].values
 
@@ -93,124 +36,121 @@ def swings(df):
 
     for i in range(PIVOT_LEN, len(df)-PIVOT_LEN):
         if h[i] == np.max(h[i-PIVOT_LEN:i+PIVOT_LEN]):
-            sh.append(h[i])
+            sh.append((i, h[i]))
         if l[i] == np.min(l[i-PIVOT_LEN:i+PIVOT_LEN]):
-            sl.append(l[i])
+            sl.append((i, l[i]))
 
     return sh, sl
 
-# =========================
-# STRUCTURE (BOS ONLY)
 # =========================
 def structure(sh, sl, close):
     if len(sh) < 2 or len(sl) < 2:
         return None
 
-    if close > sh[-1]:
+    if close > sh[-1][1]:
         return "BOS_UP"
-    if close < sl[-1]:
+    if close < sl[-1][1]:
         return "BOS_DOWN"
 
     return None
 
 # =========================
-# ORDER BLOCK
-# =========================
-def order_block(df):
-    for i in range(len(df)-OB_LOOKBACK, len(df)):
-        if df["o"].iloc[i] > df["c"].iloc[i]:
-            return (df["h"].iloc[i], df["l"].iloc[i])
+def order_block(df, i):
+    start = max(0, i-OB_LOOKBACK)
+    for j in range(start, i):
+        if df["o"].iloc[j] > df["c"].iloc[j]:
+            return df["c"].iloc[j]
     return None
 
 # =========================
-# SIGNAL ENGINE
-# =========================
-def signal(df):
-    if df.empty or len(df) < 60:
-        return None
+def backtest(df):
+    trades = []
 
-    close = df["c"].iloc[-1]
+    for i in range(50, len(df)-24):
 
-    sh, sl = swings(df)
-    struct = structure(sh, sl, close)
-    ob = order_block(df)
+        sub = df.iloc[:i]
 
-    if not struct or not ob:
-        return None
+        sh, sl = swings(sub)
+        struct = structure(sh, sl, sub["c"].iloc[-1])
+        ob = order_block(sub, i-1)
 
-    ob_h, ob_l = ob
+        if not struct or not ob:
+            continue
 
-    top = min(ob_h, close)
-    bot = max(ob_l, close)
+        entry = sub["c"].iloc[-1]
 
-    if top <= bot:
-        return None
+        if struct == "BOS_UP":
+            direction = "LONG"
+            tp = entry * (1 + TP)
+            slv = entry * (1 - SL)
 
-    # noise filter (çok küçük hareketleri ele)
-    strength = abs(top - bot) / close
-    if strength < 0.002:
-        return None
+        else:
+            direction = "SHORT"
+            tp = entry * (1 - TP)
+            slv = entry * (1 + SL)
 
-    if struct == "BOS_UP":
-        return "LONG", (top, bot)
+        future = df.iloc[i:i+24]
 
-    if struct == "BOS_DOWN":
-        return "SHORT", (top, bot)
+        result = "LOSS"
 
-    return None
+        for _, row in future.iterrows():
 
-# =========================
-# MAIN (SINGLE RUN SAFE)
+            if direction == "LONG":
+                if row["h"] >= tp:
+                    result = "WIN"
+                    break
+                if row["l"] <= slv:
+                    break
+
+            if direction == "SHORT":
+                if row["l"] <= tp:
+                    result = "WIN"
+                    break
+                if row["h"] >= slv:
+                    break
+
+        trades.append(result)
+
+    return trades
+
 # =========================
 def run():
-    print("===== V2 START =====")
+    print("===== 1 WEEK PERFORMANCE REPORT =====")
 
-    ex = ccxt.okx({"options": {"defaultType": "swap"}})
+    total_trades = 0
+    wins = 0
 
-    state = load_state()
-    new_state = state.copy()
+    for pair in PAIRS:
 
-    total = 0
+        try:
+            df = fetch(pair)
 
-    for tf in TIMEFRAMES:
-        for pair in PAIRS:
+            results = backtest(df)
 
-            df = fetch(ex, pair, TIMEFRAMES[tf])
-            if df.empty:
+            if not results:
                 continue
 
-            res = signal(df)
-            if not res:
-                continue
+            w = results.count("WIN")
+            l = results.count("LOSS")
 
-            direction, zone = res
+            total_trades += len(results)
+            wins += w
 
-            key = f"{pair}_{tf}_{direction}_{zone[0]:.5f}_{zone[1]:.5f}"
+            winrate = (w / len(results)) * 100
 
-            if key in state:
-                continue
+            print(f"\n{pair}")
+            print("Trades:", len(results))
+            print("Win:", w, "Loss:", l)
+            print("Winrate:", round(winrate, 2), "%")
 
-            new_state[key] = True
+        except Exception as e:
+            print("error:", pair, e)
 
-            msg = f"""
-{'🟢 LONG' if direction=='LONG' else '🔴 SHORT'}
+    overall = (wins / total_trades) * 100 if total_trades > 0 else 0
 
-Coin: {pair}
-TF: {tf}
-Zone: {zone[1]:.5f} - {zone[0]:.5f}
-Time: {datetime.utcnow()}
-"""
-
-            send(msg)
-
-            print("SENT:", key)
-
-            total += 1
-
-    save_state(new_state)
-
-    print("TOTAL SIGNALS:", total)
-    send(f"📊 V2 Scan tamamlandı. Sinyal: {total}")
+    print("\n===== SUMMARY =====")
+    print("Total Trades:", total_trades)
+    print("Winrate:", round(overall, 2), "%")
 
 if __name__ == "__main__":
     run()
