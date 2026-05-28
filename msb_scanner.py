@@ -1,309 +1,249 @@
-```python
 import ccxt
 import pandas as pd
 import numpy as np
 import time
-
-# ==========================
-# CONFIG
-# ==========================
 PAIRS = [
-    "BTC/USDT:USDT",
-    "ETH/USDT:USDT",
-    "DYDX/USDT:USDT"
+"BTC/USDT",
+"ETH/USDT",
+"DYDX/USDT"
 ]
-
 TIMEFRAMES = {
-    "15m": 15 * 60 * 1000,
-    "1h": 60 * 60 * 1000
+"15m": 15 * 60 * 1000,
+"1h": 60 * 60 * 1000
 }
-
 MONTHS_BACK = 6
-
 PIVOT = 5
 OB_LOOKBACK = 20
-
 SL_PCT = 0.01
 RR = 1.2
-
 BATCH_LIMIT = 100
-
-ex = ccxt.okx({
-    "enableRateLimit": True,
-    "options": {"defaultType": "swap"}
+exchange = ccxt.okx({
+"enableRateLimit": True,
+"options": {
+"defaultType": "swap"
+}
 })
-
-
-# ==========================
-# FETCH REAL HISTORY
-# ==========================
 def fetch_real_history(symbol, tf):
+now_ms = exchange.milliseconds()
+months_ms = MONTHS_BACK * 30 * 24 * 60 * 60 * 1000
+since = now_ms - months_ms
+all_data = []
 
-    now_ms = ex.milliseconds()
+while since < now_ms:
+    try:
+        batch = exchange.fetch_ohlcv(
+            symbol,
+            timeframe=tf,
+            since=since,
+            limit=BATCH_LIMIT
+        )
 
-    months_ms = MONTHS_BACK * 30 * 24 * 60 * 60 * 1000
-    since = now_ms - months_ms
-
-    all_data = []
-
-    while since < now_ms:
-
-        try:
-            batch = ex.fetch_ohlcv(
-                symbol,
-                timeframe=tf,
-                since=since,
-                limit=BATCH_LIMIT
-            )
-
-            if not batch:
-                break
-
-            all_data.extend(batch)
-
-            last_ts = batch[-1][0]
-
-            if last_ts <= since:
-                break
-
-            since = last_ts + TIMEFRAMES[tf]
-
-            time.sleep(ex.rateLimit / 1000)
-
-        except Exception as e:
-            print("fetch error:", symbol, tf, e)
+        if not batch:
             break
 
-    if not all_data:
-        return pd.DataFrame()
+        all_data.extend(batch)
 
-    df = pd.DataFrame(
-        all_data,
-        columns=["ts", "o", "h", "l", "c", "v"]
-    )
+        last_ts = batch[-1][0]
 
-    df = df.drop_duplicates(subset=["ts"])
-    df = df.reset_index(drop=True)
+        if last_ts <= since:
+            break
 
-    return df
+        since = last_ts + TIMEFRAMES[tf]
 
+        time.sleep(exchange.rateLimit / 1000)
 
-# ==========================
-# SWINGS
-# ==========================
+    except Exception as e:
+        print("fetch error:", symbol, tf, e)
+        break
+
+if not all_data:
+    return pd.DataFrame()
+
+df = pd.DataFrame(
+    all_data,
+    columns=["ts", "o", "h", "l", "c", "v"]
+)
+
+df = df.drop_duplicates(subset=["ts"])
+df = df.reset_index(drop=True)
+
+return df
 def swings(df):
+highs = df["h"].values
+lows = df["l"].values
+swing_highs = []
+swing_lows = []
 
-    h = df["h"].values
-    l = df["l"].values
+for i in range(PIVOT, len(df) - PIVOT):
 
-    sh = []
-    sl = []
+    if highs[i] == np.max(highs[i - PIVOT:i + PIVOT + 1]):
+        swing_highs.append((i, highs[i]))
 
-    for i in range(PIVOT, len(df) - PIVOT):
+    if lows[i] == np.min(lows[i - PIVOT:i + PIVOT + 1]):
+        swing_lows.append((i, lows[i]))
 
-        if h[i] == np.max(h[i-PIVOT:i+PIVOT+1]):
-            sh.append((i, h[i]))
-
-        if l[i] == np.min(l[i-PIVOT:i+PIVOT+1]):
-            sl.append((i, l[i]))
-
-    return sh, sl
-
-
-# ==========================
-# CHOCH
-# ==========================
-def choch(sh, sl):
-
-    if len(sh) < 2 or len(sl) < 2:
-        return None
-
-    if sh[-1][1] < sh[-2][1]:
-        return "DOWN"
-
-    if sl[-1][1] > sl[-2][1]:
-        return "UP"
-
+return swing_highs, swing_lows
+def choch(swing_highs, swing_lows):
+if len(swing_highs) < 2 or len(swing_lows) < 2:
     return None
 
+if swing_highs[-1][1] < swing_highs[-2][1]:
+    return "DOWN"
 
-# ==========================
-# LIQUIDITY
-# ==========================
-def liquidity(close, sh, sl):
+if swing_lows[-1][1] > swing_lows[-2][1]:
+    return "UP"
 
-    if len(sh) < 2 or len(sl) < 2:
-        return False, False
+return None
+def liquidity(close, swing_highs, swing_lows):
+if len(swing_highs) < 2 or len(swing_lows) < 2:
+    return False, False
 
-    sweep_high = close >= max(x[1] for x in sh[-2:])
-    sweep_low = close <= min(x[1] for x in sl[-2:])
+sweep_high = close >= max(x[1] for x in swing_highs[-2:])
+sweep_low = close <= min(x[1] for x in swing_lows[-2:])
 
-    return sweep_high, sweep_low
-
-
-# ==========================
-# ORDER BLOCK
-# ==========================
+return sweep_high, sweep_low
 def order_block(df, idx):
+start = max(0, idx - OB_LOOKBACK)
 
-    start = max(0, idx - OB_LOOKBACK)
+for i in range(idx, start, -1):
 
-    for i in range(idx, start, -1):
+    candle_range = df["h"].iloc[i] - df["l"].iloc[i]
+    body = abs(df["c"].iloc[i] - df["o"].iloc[i])
 
-        rng = df["h"].iloc[i] - df["l"].iloc[i]
-        body = abs(df["c"].iloc[i] - df["o"].iloc[i])
+    if candle_range == 0:
+        continue
 
-        if rng == 0:
-            continue
+    if body / candle_range > 0.55:
+        return (
+            df["h"].iloc[i],
+            df["l"].iloc[i]
+        )
 
-        if body / rng > 0.55:
-            return (
-                df["h"].iloc[i],
-                df["l"].iloc[i]
-            )
-
-    return None
-
-
-# ==========================
-# SIGNAL
-# ==========================
+return None
 def signal(sub):
+swing_highs, swing_lows = swings(sub)
 
-    sh, sl = swings(sub)
-
-    if len(sh) < 2 or len(sl) < 2:
-        return None
-
-    trend = choch(sh, sl)
-
-    if trend is None:
-        return None
-
-    close = sub["c"].iloc[-1]
-
-    sweep_high, sweep_low = liquidity(close, sh, sl)
-
-    ob = order_block(sub, len(sub)-2)
-
-    if ob is None:
-        return None
-
-    ob_high, _ = ob
-
-    risk = close * SL_PCT
-    reward = abs(ob_high - close)
-
-    rr = reward / risk if risk > 0 else 0
-
-    if rr < RR:
-        return None
-
-    if trend == "UP" and sweep_low:
-        return "LONG"
-
-    if trend == "DOWN" and sweep_high:
-        return "SHORT"
-
+if len(swing_highs) < 2 or len(swing_lows) < 2:
     return None
 
+trend = choch(swing_highs, swing_lows)
 
-# ==========================
-# BACKTEST
-# ==========================
+if trend is None:
+    return None
+
+close = sub["c"].iloc[-1]
+
+sweep_high, sweep_low = liquidity(
+    close,
+    swing_highs,
+    swing_lows
+)
+
+ob = order_block(sub, len(sub) - 2)
+
+if ob is None:
+    return None
+
+ob_high, _ = ob
+
+risk = close * SL_PCT
+reward = abs(ob_high - close)
+
+rr_value = reward / risk if risk > 0 else 0
+
+if rr_value < RR:
+    return None
+
+if trend == "UP" and sweep_low:
+    return "LONG"
+
+if trend == "DOWN" and sweep_high:
+    return "SHORT"
+
+return None
 def backtest(df, tf):
+trades = []
 
-    trades = []
+future_bars = 24 if tf == "15m" else 12
 
-    future_bars = 24 if tf == "15m" else 12
+for i in range(80, len(df) - future_bars):
 
-    for i in range(80, len(df) - future_bars):
+    sub = df.iloc[:i]
 
-        sub = df.iloc[:i]
+    side = signal(sub)
 
-        side = signal(sub)
+    if side is None:
+        continue
 
-        if side is None:
-            continue
+    entry = sub["c"].iloc[-1]
 
-        entry = sub["c"].iloc[-1]
+    if side == "LONG":
+        tp = entry * (1 + (SL_PCT * RR))
+        sl = entry * (1 - SL_PCT)
+    else:
+        tp = entry * (1 - (SL_PCT * RR))
+        sl = entry * (1 + SL_PCT)
+
+    future = df.iloc[i:i + future_bars]
+
+    result = False
+
+    for _, row in future.iterrows():
 
         if side == "LONG":
-            tp = entry * (1 + SL_PCT * RR)
-            sl = entry * (1 - SL_PCT)
+
+            if row["h"] >= tp:
+                result = True
+                break
+
+            if row["l"] <= sl:
+                break
+
         else:
-            tp = entry * (1 - SL_PCT * RR)
-            sl = entry * (1 + SL_PCT)
 
-        future = df.iloc[i:i+future_bars]
+            if row["l"] <= tp:
+                result = True
+                break
 
-        result = False
+            if row["h"] >= sl:
+                break
 
-        for _, row in future.iterrows():
+    trades.append(result)
 
-            if side == "LONG":
-
-                if row["h"] >= tp:
-                    result = True
-                    break
-
-                if row["l"] <= sl:
-                    break
-
-            else:
-
-                if row["l"] <= tp:
-                    result = True
-                    break
-
-                if row["h"] >= sl:
-                    break
-
-        trades.append(result)
-
-    return trades
-
-
-# ==========================
-# RUN
-# ==========================
+return trades
 def run():
+print("===== REAL 6 MONTH PERFORMANCE REPORT =====")
 
-    print("===== REAL 6 MONTH PERFORMANCE REPORT =====")
+for tf in TIMEFRAMES:
 
-    for tf in TIMEFRAMES:
+    print(f"\n===== {tf.upper()} =====")
 
-        print(f"\n===== {tf.upper()} =====")
+    for pair in PAIRS:
 
-        for pair in PAIRS:
+        print(f"Loading {pair} {tf}...")
 
-            print(f"Loading {pair} {tf}...")
+        df = fetch_real_history(pair, tf)
 
-            df = fetch_real_history(pair, tf)
+        if df.empty:
+            print(pair, "NO DATA")
+            continue
 
-            if df.empty:
-                print(pair, "DATA YOK")
-                continue
+        print("Candles:", len(df))
 
-            print("Candles:", len(df))
+        results = backtest(df, tf)
 
-            results = backtest(df, tf)
+        if len(results) == 0:
+            print(pair, "NO SIGNAL")
+            continue
 
-            if len(results) == 0:
-                print(pair, "NO SIGNAL")
-                continue
+        wins = sum(results)
+        losses = len(results) - wins
+        wr = round((wins / len(results)) * 100, 2)
 
-            wins = sum(results)
-            losses = len(results) - wins
-            wr = round((wins / len(results)) * 100, 2)
-
-            print(
-                f"{pair} | Trades:{len(results)} "
-                f"| Win:{wins} Loss:{losses} "
-                f"| WR:{wr}%"
-            )
-
-
-if __name__ == "__main__":
-    run()
-```
+        print(
+            f"{pair} | Trades:{len(results)} "
+            f"| Win:{wins} Loss:{losses} "
+            f"| WR:{wr}%"
+        )
+if name == "main":
+run()
