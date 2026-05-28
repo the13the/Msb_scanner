@@ -1,4 +1,4 @@
-```yaml
+```y
 name: MSB Kesişim Tarayıcı
 
 on:
@@ -45,4 +45,3 @@ jobs:
         with:
           path: sent_signals.json
           key: sent-signals-cache
-```
