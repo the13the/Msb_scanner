@@ -6,8 +6,8 @@ import numpy as np
 # CONFIG
 # ==========================
 TIMEFRAMES = {
-    "15m": 17280,   # yaklaşık 6 ay
-    "1h": 4320      # yaklaşık 6 ay
+    "15m": 17280,   # ~6 ay
+    "1h": 4320      # ~6 ay
 }
 
 PIVOT = 5
@@ -16,7 +16,11 @@ OB_LOOKBACK = 20
 SL_PCT = 0.01
 RR = 1.2
 
-PAIR = "BTC/USDT:USDT"
+PAIRS = [
+    "BTC/USDT:USDT",
+    "ETH/USDT:USDT",
+    "DYDX/USDT:USDT"
+]
 
 ex = ccxt.okx({
     "enableRateLimit": True,
@@ -111,7 +115,6 @@ def order_block(df, idx):
             continue
 
         if body / rng > 0.55:
-
             return (
                 df["h"].iloc[i],
                 df["l"].iloc[i]
@@ -184,7 +187,6 @@ def backtest(df):
         if side == "LONG":
             tp = entry * (1 + SL_PCT * RR)
             sl = entry * (1 - SL_PCT)
-
         else:
             tp = entry * (1 - SL_PCT * RR)
             sl = entry * (1 + SL_PCT)
@@ -223,33 +225,35 @@ def backtest(df):
 # ==========================
 def run():
 
-    print("===== DYDX 6 MONTH REPORT =====")
+    print("===== 6 MONTH PERFORMANCE REPORT =====")
 
     for tf, limit in TIMEFRAMES.items():
 
         print(f"\n===== {tf.upper()} =====")
 
-        df = fetch(PAIR, tf, limit)
+        for pair in PAIRS:
 
-        if df.empty:
-            print("DATA YOK")
-            continue
+            df = fetch(pair, tf, limit)
 
-        results = backtest(df)
+            if df.empty:
+                print(pair, "DATA YOK")
+                continue
 
-        if len(results) == 0:
-            print("NO SIGNAL")
-            continue
+            results = backtest(df)
 
-        wins = sum(results)
-        losses = len(results) - wins
-        wr = round((wins / len(results)) * 100, 2)
+            if len(results) == 0:
+                print(pair, "NO SIGNAL")
+                continue
 
-        print(PAIR)
-        print("Trades:", len(results))
-        print("Win:", wins)
-        print("Loss:", losses)
-        print("Winrate:", wr, "%")
+            wins = sum(results)
+            losses = len(results) - wins
+            wr = round((wins / len(results)) * 100, 2)
+
+            print(
+                f"{pair} | Trades:{len(results)} "
+                f"| Win:{wins} Loss:{losses} "
+                f"| WR:{wr}%"
+            )
 
 
 if __name__ == "__main__":
