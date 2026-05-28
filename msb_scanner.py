@@ -24,7 +24,6 @@ exchange = ccxt.okx({
 
 def fetch():
 
-```
 bars = exchange.fetch_ohlcv(
     SYMBOL,
     timeframe=TIMEFRAME,
