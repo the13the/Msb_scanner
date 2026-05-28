@@ -10,7 +10,7 @@ PIVOT = 8
 LIMIT = 500
 
 SL_PCT = 0.01
-RR = 1.4
+RR = 1.5
 FUTURE_BARS = 12
 
 MIN_SWEEP_PCT = 0.003
@@ -21,6 +21,9 @@ exchange = ccxt.okx({
 })
 
 
+# -------------------------
+# DATA
+# -------------------------
 def fetch_data(symbol, timeframe):
     now = exchange.milliseconds()
     since = now - MONTHS_BACK * 30 * 24 * 60 * 60 * 1000
@@ -44,7 +47,27 @@ def fetch_data(symbol, timeframe):
     df = pd.DataFrame(candles, columns=["ts","o","h","l","c","v"])
     df.drop_duplicates(subset=["ts"], inplace=True)
     df.reset_index(drop=True, inplace=True)
+
     return df
+
+
+# -------------------------
+# ATR (VOLATILITY FILTER)
+# -------------------------
+def atr(df, period=14):
+    high = df["h"]
+    low = df["l"]
+    close = df["c"]
+
+    tr = np.maximum(
+        high - low,
+        np.maximum(
+            abs(high - close.shift(1)),
+            abs(low - close.shift(1))
+        )
+    )
+
+    return tr.rolling(period).mean()
 
 
 # -------------------------
@@ -68,10 +91,10 @@ def get_swings(df):
 
 
 # -------------------------
-# SIGNAL ENGINE (FIXED)
+# SIGNAL ENGINE V6.2
 # -------------------------
 def signal(df):
-    if len(df) < 120:
+    if len(df) < 150:
         return None
 
     swing_highs, swing_lows = get_swings(df)
@@ -90,7 +113,7 @@ def signal(df):
     c = df["c"].iloc[-1]
 
     # -------------------------
-    # REAL SWEEP (FIXED)
+    # SWEEP LOGIC (REAL)
     # -------------------------
     sweep_high = (
         h > last_high and
@@ -105,14 +128,36 @@ def signal(df):
     )
 
     # -------------------------
-    # CLEAN TREND (NO BOS, NO CONFUSION)
+    # TREND FILTER (CLEAN)
     # -------------------------
     trend_up = last_low > prev_low
     trend_down = last_high < prev_high
 
     # -------------------------
-    # ENTRY LOGIC (PURE REVERSAL)
+    # DISPLACEMENT (CRITICAL UPGRADE)
     # -------------------------
+    body = abs(c - df["o"].iloc[-1])
+    candle_range = h - l
+
+    displacement = body > (candle_range * 0.6)
+
+    # -------------------------
+    # ATR FILTER (CHOP FILTER)
+    # -------------------------
+    atr_val = atr(df).iloc[-1]
+    avg_range = (df["h"] - df["l"]).rolling(20).mean().iloc[-1]
+
+    if np.isnan(atr_val) or np.isnan(avg_range):
+        return None
+
+    volatility_ok = atr_val > (avg_range * 0.8)
+
+    # -------------------------
+    # FINAL LOGIC
+    # -------------------------
+    if not (displacement and volatility_ok):
+        return None
+
     if trend_up and sweep_low:
         return "LONG"
 
@@ -128,7 +173,7 @@ def signal(df):
 def backtest(df):
     trades = []
 
-    for i in range(120, len(df) - FUTURE_BARS):
+    for i in range(150, len(df) - FUTURE_BARS):
 
         sub = df.iloc[:i]
         side = signal(sub)
@@ -174,7 +219,7 @@ def backtest(df):
 # -------------------------
 # RUN
 # -------------------------
-print("===== DYDX V6.1 FIXED REPORT =====")
+print("===== DYDX V6.2 REPORT =====")
 print("Loading", PAIR, TIMEFRAME)
 
 df = fetch_data(PAIR, TIMEFRAME)
