@@ -8,12 +8,15 @@ TIMEFRAME = "1h"
 MONTHS_BACK = 12
 
 INITIAL_BALANCE = 10000
-RISK_PER_TRADE = 0.01  # %1 risk
+RISK_PER_TRADE = 0.01
+
 SL_PCT = 0.008
 RR = 1.8
 FUTURE_BARS = 12
 
 LOOKBACK = 20
+ATR_PERIOD = 14
+COOLDOWN = 5  # candles
 
 exchange = ccxt.okx({
     "enableRateLimit": True,
@@ -46,12 +49,23 @@ def fetch_data(symbol, timeframe):
 
 
 # -------------------------
+# ATR (VOLATILITY FILTER)
+# -------------------------
+def atr(df, period=14):
+    high_low = df["h"] - df["l"]
+    high_close = np.abs(df["h"] - df["c"].shift())
+    low_close = np.abs(df["l"] - df["c"].shift())
+
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
+
+
+# -------------------------
 # TREND
 # -------------------------
 def trend(df):
     ma50 = df["c"].rolling(50).mean()
     ma200 = df["c"].rolling(200).mean()
-
     return "UP" if ma50.iloc[-1] > ma200.iloc[-1] else "DOWN"
 
 
@@ -65,20 +79,23 @@ def levels(df):
 
 
 # -------------------------
-# SIGNAL
+# SIGNAL (OPTIMIZED)
 # -------------------------
-def signal(df):
-    if len(df) < 200:
+def signal(df, i):
+    if i < 200:
         return None
 
-    tr = trend(df)
-    highs, lows = levels(df)
-
-    i = len(df) - 1
+    tr = trend(df.iloc[:i])
+    highs, lows = levels(df.iloc[:i])
 
     h = df["h"].iloc[i]
     l = df["l"].iloc[i]
     c = df["c"].iloc[i]
+    o = df["o"].iloc[i]
+
+    # ATR FILTER
+    if df["atr"].iloc[i] < df["atr"].mean():
+        return None
 
     last_high = highs.iloc[i-1]
     last_low = lows.iloc[i-1]
@@ -89,50 +106,58 @@ def signal(df):
     retest_high = l <= last_high and c > last_high
     retest_low = h >= last_low and c < last_low
 
-    if tr == "UP" and bos_up and retest_high:
+    # momentum candle
+    body = abs(c - o)
+    rng = h - l
+    strong = rng > 0 and body / rng > 0.6
+
+    if tr == "UP" and bos_up and retest_high and strong:
         return "LONG"
 
-    if tr == "DOWN" and bos_down and retest_low:
+    if tr == "DOWN" and bos_down and retest_low and strong:
         return "SHORT"
 
     return None
 
 
 # -------------------------
-# PROP FIRM BACKTEST ENGINE
+# BACKTEST (WITH COOLDOWN + RISK CONTROL)
 # -------------------------
 def backtest(df):
-    balance = INITIAL_BALANCE
-    equity_curve = [balance]
+    df["atr"] = atr(df, ATR_PERIOD)
 
-    max_balance = balance
-    max_drawdown = 0
+    balance = INITIAL_BALANCE
+    equity = [balance]
+
+    last_trade_index = -COOLDOWN
 
     trades = 0
     wins = 0
     losses = 0
+    max_dd = 0
+    peak = balance
 
     for i in range(200, len(df) - FUTURE_BARS):
 
-        sub = df.iloc[:i]
-        side = signal(sub)
+        if i - last_trade_index < COOLDOWN:
+            continue
+
+        side = signal(df, i)
 
         if not side:
             continue
 
         entry = df["o"].iloc[i+1]
 
-        risk_amount = balance * RISK_PER_TRADE
-        sl_distance = entry * SL_PCT
-
-        position_size = risk_amount / sl_distance
+        risk = balance * RISK_PER_TRADE
+        sl_dist = entry * SL_PCT
 
         if side == "LONG":
-            sl = entry - sl_distance
-            tp = entry + sl_distance * RR
+            sl = entry - sl_dist
+            tp = entry + sl_dist * RR
         else:
-            sl = entry + sl_distance
-            tp = entry - sl_distance * RR
+            sl = entry + sl_dist
+            tp = entry - sl_dist * RR
 
         future = df.iloc[i+1:i+1+FUTURE_BARS]
 
@@ -148,59 +173,56 @@ def backtest(df):
                     result = "LOSS"
                     break
             else:
-                if row["l"] <= tp:
+                if row["l"] >= tp:
                     result = "WIN"
                     break
                 if row["h"] >= sl:
                     result = "LOSS"
                     break
 
-        if result == "WIN":
-            pnl = risk_amount * RR
-            balance += pnl
-            wins += 1
-
-        elif result == "LOSS":
-            pnl = -risk_amount
-            balance += pnl
-            losses += 1
-
-        else:
+        if result is None:
             continue
 
+        last_trade_index = i
         trades += 1
-        equity_curve.append(balance)
 
-        max_balance = max(max_balance, balance)
-        drawdown = (max_balance - balance) / max_balance
-        max_drawdown = max(max_drawdown, drawdown)
+        if result == "WIN":
+            balance += risk * RR
+            wins += 1
+        else:
+            balance -= risk
+            losses += 1
 
-    return trades, wins, losses, balance, max_drawdown, equity_curve
+        equity.append(balance)
+
+        peak = max(peak, balance)
+        dd = (peak - balance) / peak
+        max_dd = max(max_dd, dd)
+
+    return trades, wins, losses, balance, max_dd
 
 
 # -------------------------
 # RUN
 # -------------------------
-print("===== BTC PROP FIRM ENGINE =====")
+print("===== BTC PROP FIRM V9 OPTIMIZED =====")
 
 df = fetch_data(PAIR, TIMEFRAME)
 
 if df.empty:
     print("NO DATA")
-
 else:
-    trades, wins, losses, final_balance, mdd, curve = backtest(df)
+    trades, wins, losses, bal, dd = backtest(df)
 
     if trades == 0:
         print("NO SIGNAL")
-
     else:
         wr = round(wins / trades * 100, 2)
-        profit = round(final_balance - INITIAL_BALANCE, 2)
+        profit = round(bal - INITIAL_BALANCE, 2)
 
         print(f"Trades: {trades}")
         print(f"Win: {wins} Loss: {losses}")
         print(f"WR: {wr}%")
-        print(f"Final Balance: {final_balance}$")
+        print(f"Final Balance: {bal}$")
         print(f"Profit: {profit}$")
-        print(f"Max Drawdown: {round(mdd*100,2)}%")
+        print(f"Max Drawdown: {round(dd*100,2)}%")
