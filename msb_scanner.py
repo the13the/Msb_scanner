@@ -10,9 +10,8 @@ PAIRS = [
 
 TIMEFRAMES = ["15m", "1h"]
 
-MONTHS_BACK = 6
+MONTHS_BACK = 3
 PIVOT = 5
-
 SL_PCT = 0.01
 RR = 1.2
 LIMIT = 500
@@ -269,7 +268,7 @@ def backtest(df, tf):
 
 
 print(
-    "===== 6 MONTH PERFORMANCE REPORT ====="
+    "===== 3 MONTH PERFORMANCE REPORT ====="
 )
 
 for tf in TIMEFRAMES:
