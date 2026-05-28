@@ -29,7 +29,7 @@ STRENGTH_FILTER = {
     "1D": 0.02      # %2 sert filtre
 }
 
-# Aynı sinyal spam önleme
+# Spam önleme
 sent_signals = set()
 
 
@@ -122,11 +122,13 @@ def get_candles(symbol, timeframe):
 
 
 # ==========================
-# YENI MSB TESPITI
+# GERÇEK YENİ MSB
 # ==========================
 def detect_msb(df, tf_name):
 
-    if df is None or len(df) < 40:
+    global sent_signals
+
+    if df is None or len(df) < 50:
         return None
 
     try:
@@ -137,46 +139,76 @@ def detect_msb(df, tf_name):
         previous_high = highs.iloc[-10]
         previous_low = lows.iloc[-10]
 
-        current_close = df["close"].iloc[-1]
-        prev_close = df["close"].iloc[-2]
-        before_prev_close = df["close"].iloc[-3]
+        prev_candle = df.iloc[-2]
+        current_candle = df.iloc[-1]
+
+        prev_close = prev_candle["close"]
+        current_close = current_candle["close"]
+
+        current_low = current_candle["low"]
+        current_high = current_candle["high"]
+
+        candle_time = current_candle["ts"]
 
         filter_pct = STRENGTH_FILTER[tf_name]
 
-        # Güç hesaplama
+        # ==========================
+        # LONG
+        # ==========================
         long_strength = (
             (current_close - previous_high)
             / previous_high
         )
 
+        long_break = (
+            prev_close <= previous_high
+            and (
+                current_close > previous_high
+                or current_high > previous_high
+            )
+        )
+
+        if long_break and long_strength >= filter_pct:
+
+            signal_key = (
+                f"LONG_"
+                f"{tf_name}_"
+                f"{round(previous_high,6)}_"
+                f"{candle_time}"
+            )
+
+            if signal_key not in sent_signals:
+                sent_signals.add(signal_key)
+                return "LONG"
+
+        # ==========================
+        # SHORT
+        # ==========================
         short_strength = (
             (previous_low - current_close)
             / previous_low
         )
 
-        # ======================
-        # LONG
-        # ======================
-        long_new_break = (
-            before_prev_close <= previous_high
-            and prev_close <= previous_high
-            and current_close > previous_high
+        short_break = (
+            prev_close >= previous_low
+            and (
+                current_close < previous_low
+                or current_low < previous_low
+            )
         )
 
-        if long_new_break and long_strength >= filter_pct:
-            return "LONG"
+        if short_break and short_strength >= filter_pct:
 
-        # ======================
-        # SHORT
-        # ======================
-        short_new_break = (
-            before_prev_close >= previous_low
-            and prev_close >= previous_low
-            and current_close < previous_low
-        )
+            signal_key = (
+                f"SHORT_"
+                f"{tf_name}_"
+                f"{round(previous_low,6)}_"
+                f"{candle_time}"
+            )
 
-        if short_new_break and short_strength >= filter_pct:
-            return "SHORT"
+            if signal_key not in sent_signals:
+                sent_signals.add(signal_key)
+                return "SHORT"
 
         return None
 
@@ -210,14 +242,6 @@ def scan():
                 if signal is None:
                     continue
 
-                signal_key = f"{pair}_{tf_name}_{signal}"
-
-                # Spam önleme
-                if signal_key in sent_signals:
-                    continue
-
-                sent_signals.add(signal_key)
-
                 saat = datetime.now().strftime("%H:%M")
 
                 emoji = "🟢" if signal == "LONG" else "🔴"
@@ -237,8 +261,8 @@ def scan():
                 print(f"{pair} hata: {e}")
 
         if found:
-            for x in found:
-                print(x)
+            for item in found:
+                print(item)
         else:
             print("Sinyal yok")
 
