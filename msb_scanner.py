@@ -12,9 +12,13 @@ TIMEFRAMES = ["15m", "1h"]
 
 MONTHS_BACK = 3
 PIVOT = 5
+
 SL_PCT = 0.01
-RR = 1.2
+RR = 1.5
 LIMIT = 500
+
+EMA_PERIOD = 200
+MIN_SWEEP_PCT = 0.002
 
 exchange = ccxt.okx({
     "enableRateLimit": True,
@@ -107,18 +111,25 @@ def fetch_data(symbol, timeframe):
         inplace=True
     )
 
+    df["ema200"] = (
+        df["c"]
+        .ewm(span=EMA_PERIOD)
+        .mean()
+    )
+
     return df
 
 
 def signal(df):
 
-    if len(df) < 30:
+    if len(df) < EMA_PERIOD:
         return None
 
     highs = df["h"].values
     lows = df["l"].values
 
     close = df["c"].iloc[-1]
+    ema200 = df["ema200"].iloc[-1]
 
     swing_highs = []
     swing_lows = []
@@ -155,16 +166,28 @@ def signal(df):
     ):
         return None
 
+    last_high = max(
+        swing_highs[-2:]
+    )
+
+    last_low = min(
+        swing_lows[-2:]
+    )
+
     sweep_high = (
-        close >= max(
-            swing_highs[-2:]
-        )
+        close > last_high
+        and
+        abs(close - last_high)
+        / last_high
+        > MIN_SWEEP_PCT
     )
 
     sweep_low = (
-        close <= min(
-            swing_lows[-2:]
-        )
+        close < last_low
+        and
+        abs(close - last_low)
+        / last_low
+        > MIN_SWEEP_PCT
     )
 
     trend_up = (
@@ -179,10 +202,18 @@ def signal(df):
         swing_highs[-2]
     )
 
-    if trend_up and sweep_low:
+    if (
+        trend_up
+        and sweep_low
+        and close > ema200
+    ):
         return "LONG"
 
-    if trend_down and sweep_high:
+    if (
+        trend_down
+        and sweep_high
+        and close < ema200
+    ):
         return "SHORT"
 
     return None
@@ -199,7 +230,7 @@ def backtest(df, tf):
     )
 
     for i in range(
-        50,
+        EMA_PERIOD,
         len(df) - future_bars
     ):
 
@@ -268,7 +299,7 @@ def backtest(df, tf):
 
 
 print(
-    "===== 3 MONTH PERFORMANCE REPORT ====="
+    "===== V4 PERFORMANCE REPORT ====="
 )
 
 for tf in TIMEFRAMES:
