@@ -1,3 +1,4 @@
+```yaml
 name: MSB Kesişim Tarayıcı
 
 on:
@@ -32,6 +33,11 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
+
+          OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+          OKX_SECRET: ${{ secrets.OKX_SECRET }}
+          OKX_PASSWORD: ${{ secrets.OKX_PASSWORD }}
+
         run: python msb_scanner.py
 
       - name: Gönderilen sinyalleri kaydet (cache güncelle)
@@ -39,3 +45,4 @@ jobs:
         with:
           path: sent_signals.json
           key: sent-signals-cache
+```
