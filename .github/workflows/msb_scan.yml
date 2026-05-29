@@ -3,7 +3,7 @@ name: MSB Kesişim Tarayıcı
 
 on:
   schedule:
-    - cron: '0,15,30,45 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 
 jobs:
