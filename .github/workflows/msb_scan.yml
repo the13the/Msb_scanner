@@ -23,12 +23,6 @@ jobs:
       - name: Kütüphaneleri kur
         run: pip install ccxt pandas numpy requests
 
-      - name: Gönderilen sinyalleri indir (cache)
-        uses: actions/cache@v4
-        with:
-          path: sent_signals.json
-          key: sent-signals-cache
-
       - name: Tarayıcıyı çalıştır
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
@@ -40,8 +34,4 @@ jobs:
 
         run: python msb_scanner.py
 
-      - name: Gönderilen sinyalleri kaydet (cache güncelle)
-        uses: actions/cache@v4
-        with:
-          path: sent_signals.json
-          key: sent-signals-cache
+# wake scheduler
