@@ -5,15 +5,25 @@ import os
 import time
 import json
 
+# =========================
+# CONFIG
+# =========================
+
 SYMBOL = "BTC/USDT:USDT"
 TIMEFRAME = "1h"
 
 LEVERAGE = 50
+
 RISK_PER_TRADE_USD = 10
 SAFE_RISK_USD = 5
+
 RR = 1.8
 
 STATE_FILE = "signal_state.json"
+
+# =========================
+# EXCHANGE
+# =========================
 
 exchange = ccxt.okx({
     "apiKey": os.getenv("OKX_API_KEY"),
@@ -41,7 +51,6 @@ def load_state():
     try:
         with open(STATE_FILE, "r") as f:
             return json.load(f)
-
     except:
         return {
             "last_long_ts": None,
@@ -79,6 +88,10 @@ def fetch():
         ]
     )
 
+
+# =========================
+# INDICATORS
+# =========================
 
 def atr(df, period=14):
 
@@ -145,9 +158,7 @@ def get_position():
 
     try:
 
-        positions = exchange.fetch_positions(
-            [SYMBOL]
-        )
+        positions = exchange.fetch_positions([SYMBOL])
 
         for p in positions:
 
@@ -164,7 +175,6 @@ def get_position():
                         if p["side"].lower() == "long"
                         else "SHORT"
                     ),
-
                     "qty":
                     contracts
                 }
@@ -187,8 +197,8 @@ def close_position(position):
                 SYMBOL,
                 qty,
                 {
-                    "tdMode":
-                    "isolated"
+                    "tdMode": "isolated",
+                    "reduceOnly": True
                 }
             )
 
@@ -198,8 +208,8 @@ def close_position(position):
                 SYMBOL,
                 qty,
                 {
-                    "tdMode":
-                    "isolated"
+                    "tdMode": "isolated",
+                    "reduceOnly": True
                 }
             )
 
@@ -281,10 +291,7 @@ def risk_amount(entry, sl, side):
 
     if liq_gap <= sl_gap * 1.3:
 
-        print(
-            "SAFE MODE: Risk 5 USD"
-        )
-
+        print("SAFE MODE: Risk 5 USD")
         return SAFE_RISK_USD
 
     return RISK_PER_TRADE_USD
@@ -303,33 +310,38 @@ def position_size(entry, sl, side):
         side
     )
 
-    qty = risk / dist
+    # gerçek risk hesabı
+    qty = (risk / dist) * LEVERAGE
 
-    return round(qty, 6)
+    # min size koruma
+    qty = max(qty, 0.001)
+
+    return round(qty, 3)
 
 
-def place_sl_tp(side, qty, sl, tp):
+# =========================
+# OPEN POSITION
+# =========================
+
+def open_position(side, qty, sl, tp):
 
     try:
 
         params = {
             "tdMode": "isolated",
-
             "attachAlgoOrds": [
                 {
-                    # TP LIMIT
                     "tpTriggerPx":
-                    str(round(tp, 2)),
+                        str(round(tp, 2)),
 
                     "tpOrdPx":
-                    str(round(tp, 2)),
+                        "-1",
 
-                    # SL MARKET
                     "slTriggerPx":
-                    str(round(sl, 2)),
+                        str(round(sl, 2)),
 
                     "slOrdPx":
-                    "-1"
+                        "-1"
                 }
             ]
         }
@@ -350,50 +362,7 @@ def place_sl_tp(side, qty, sl, tp):
                 params
             )
 
-        print(
-            "TP LIMIT + SL MARKET"
-        )
-
-    except Exception as e:
-        print("SL/TP error:", e)
-
-
-def open_position(side, qty, sl, tp):
-
-    try:
-
-        if side == "LONG":
-
-            exchange.create_market_buy_order(
-                SYMBOL,
-                qty,
-                {
-                    "tdMode":
-                    "isolated"
-                }
-            )
-
-        else:
-
-            exchange.create_market_sell_order(
-                SYMBOL,
-                qty,
-                {
-                    "tdMode":
-                    "isolated"
-                }
-            )
-
         print("OPEN", side)
-
-        time.sleep(2)
-
-        place_sl_tp(
-            side,
-            qty,
-            sl,
-            tp
-        )
 
     except Exception as e:
         print("Open error:", e)
@@ -415,10 +384,7 @@ try:
     )
 
 except Exception as e:
-    print(
-        "Leverage warning:",
-        e
-    )
+    print("Leverage warning:", e)
 
 
 # =========================
@@ -427,9 +393,7 @@ except Exception as e:
 
 try:
 
-    print(
-        "===== BTC BOT START ====="
-    )
+    print("===== BTC BOT START =====")
 
     state = load_state()
 
@@ -481,20 +445,9 @@ try:
                 sig
             )
 
-            print(
-                "SL:",
-                round(sl, 2)
-            )
-
-            print(
-                "TP:",
-                round(tp, 2)
-            )
-
-            print(
-                "Qty:",
-                qty
-            )
+            print("SL:", round(sl, 2))
+            print("TP:", round(tp, 2))
+            print("Qty:", qty)
 
             if pos:
 
@@ -534,14 +487,9 @@ try:
                 )
 
             if sig == "LONG":
-                state[
-                    "last_long_ts"
-                ] = candle_ts
-
+                state["last_long_ts"] = candle_ts
             else:
-                state[
-                    "last_short_ts"
-                ] = candle_ts
+                state["last_short_ts"] = candle_ts
 
             save_state(state)
 
@@ -549,5 +497,3 @@ try:
 
 except Exception as e:
     print("ERROR:", e)
-
-# scheduler wake
