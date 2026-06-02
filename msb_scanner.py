@@ -438,7 +438,7 @@ try:
                 sig
             )
 
-            tp = smart_tp(
+                        tp = smart_tp(
                 price,
                 sl,
                 sig
@@ -449,19 +449,20 @@ try:
                 sl,
                 sig
             )
+
             liq = estimate_liq_price(
-    price,
-    sig
-)
+                price,
+                sig
+            )
 
-print("LIQ PRICE:", round(liq, 2))
-print("STOP PRICE:", round(sl, 2))
+            print("LIQ PRICE:", round(liq, 2))
+            print("STOP PRICE:", round(sl, 2))
 
-if sig == "LONG":
-    print("STOP BEFORE LIQ:", sl > liq)
+            if sig == "LONG":
+                print("STOP BEFORE LIQ:", sl > liq)
 
-if sig == "SHORT":
-    print("STOP BEFORE LIQ:", sl < liq)
+            if sig == "SHORT":
+                print("STOP BEFORE LIQ:", sl < liq)
 
             print("SL:", round(sl, 2))
             print("TP:", round(tp, 2))
