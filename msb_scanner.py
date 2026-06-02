@@ -304,19 +304,24 @@ def position_size(entry, sl, side):
     if dist <= 0:
         return 0
 
-    risk = risk_amount(
-        entry,
-        sl,
-        side
-    )
+    risk = 10
 
-    # gerçek risk hesabı
     qty = (risk / dist) * LEVERAGE
 
-    # min size koruma
     qty = max(qty, 0.001)
 
-    return round(qty, 3)
+    print("=================================")
+    print("ENTRY:", round(entry, 2))
+    print("SL:", round(sl, 2))
+    print("DIST:", round(dist, 2))
+    print("RISK USD:", risk)
+    print("LEVERAGE:", LEVERAGE)
+    print("QTY:", round(qty, 6))
+    print("POSITION VALUE:", round(qty * entry, 2))
+    print("EST MARGIN:", round((qty * entry) / LEVERAGE, 2))
+    print("=================================")
+
+    return round(qty, 6)
 
 
 # =========================
@@ -444,6 +449,19 @@ try:
                 sl,
                 sig
             )
+            liq = estimate_liq_price(
+    price,
+    sig
+)
+
+print("LIQ PRICE:", round(liq, 2))
+print("STOP PRICE:", round(sl, 2))
+
+if sig == "LONG":
+    print("STOP BEFORE LIQ:", sl > liq)
+
+if sig == "SHORT":
+    print("STOP BEFORE LIQ:", sl < liq)
 
             print("SL:", round(sl, 2))
             print("TP:", round(tp, 2))
