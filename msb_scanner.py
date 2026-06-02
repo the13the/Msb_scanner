@@ -438,7 +438,7 @@ try:
                 sig
             )
 
-                        tp = smart_tp(
+            tp = smart_tp(
                 price,
                 sl,
                 sig
