@@ -291,14 +291,35 @@ def process_coin(coin):
 
     if pos:
         if pos["side"] != sig:
-            print("FLIP:", pos["side"], "->", sig)
-            close_position(symbol, pos)
-            time.sleep(2)
-            open_position(symbol, sig, qty, sl, tp)
-            send_telegram(f"🔄 <b>{name}</b> pozisyon değişti: {pos['side']} → {sig}")
+            # TERS YÖN → işlem AÇMA, sadece haber ver
+            print("TERS SİNYAL — işlem açılmadı")
+            send_telegram(
+                f"⚠️ <b>{name} TERS SİNYAL</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"Açık pozisyon: <b>{pos['side']}</b>\n"
+                f"Gelen sinyal: <b>{sig}</b>\n\n"
+                f"İşlem AÇILMADI (ters yön).\n"
+                f"👁 İstersen manuel kontrol et."
+            )
+            return  # ters yönde hiçbir şey yapma
         else:
-            print("SAME POSITION")
+            # AYNI YÖN → pozisyonu büyüt (yeni işlem aç)
+            print("AYNI YÖN — pozisyon büyütülüyor")
+            open_position(symbol, sig, qty, sl, tp)
+            emoji = "🟢" if sig == "LONG" else "🔴"
+            send_telegram(
+                f"{emoji} <b>{name} EKLEME: {sig}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"Mevcut {pos['side']} pozisyonuna eklendi.\n"
+                f"💰 Giriş: ${round(price,2)}\n"
+                f"🛑 SL: ${round(sl,2)}\n"
+                f"🎯 TP: ${round(tp,2)}\n"
+                f"⚙️ Kaldıraç: {lev}x\n"
+                f"💵 Risk: ${risk_usd}\n"
+                f"📦 Miktar: {qty}"
+            )
     else:
+        # POZİSYON YOK → yeni aç
         open_position(symbol, sig, qty, sl, tp)
         emoji = "🟢" if sig == "LONG" else "🔴"
         send_telegram(
