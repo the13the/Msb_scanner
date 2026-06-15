@@ -63,14 +63,20 @@ except Exception as e:
 # STATE
 # =========================
 
+MAX_ADDS = 3  # aynı pozisyona en fazla kaç kez eklenebilir
+
 def load_state(path):
+    default = {"last_long_ts": None, "last_short_ts": None, "add_count": 0}
     if not os.path.exists(path):
-        return {"last_long_ts": None, "last_short_ts": None}
+        return default
     try:
         with open(path, "r") as f:
-            return json.load(f)
+            data = json.load(f)
+            if "add_count" not in data:
+                data["add_count"] = 0
+            return data
     except:
-        return {"last_long_ts": None, "last_short_ts": None}
+        return default
 
 def save_state(path, state):
     with open(path, "w") as f:
@@ -167,9 +173,27 @@ def smart_stop(df, side):
     swing = df["h"].rolling(10).max().iloc[-2]
     return max(swing, price + a)
 
-def smart_tp(entry, sl, side):
+def smart_tp(df, entry, sl, side):
+    """
+    TP iki şekilde hesaplanır:
+    1) RR bazlı: SL mesafesinin RR katı
+    2) Yapısal: son 20 mumun en yüksek/düşük seviyesi (destek/direnç)
+    Hangisi daha YAKIN ve gerçekçiyse o seçilir.
+    """
     risk = abs(entry - sl)
-    return entry + (risk * RR) if side == "LONG" else entry - (risk * RR)
+    rr_tp = entry + (risk * RR) if side == "LONG" else entry - (risk * RR)
+
+    if side == "LONG":
+        structural_tp = df["h"].rolling(20).max().iloc[-2]
+        # yapısal direnç entry'nin üstündeyse ve RR TP'den daha yakınsa onu kullan
+        if structural_tp > entry and structural_tp < rr_tp:
+            return structural_tp
+        return rr_tp
+
+    structural_tp = df["l"].rolling(20).min().iloc[-2]
+    if structural_tp < entry and structural_tp > rr_tp:
+        return structural_tp
+    return rr_tp
 
 # =========================
 # KALDIRAÇ / RISK
@@ -273,7 +297,7 @@ def process_coin(coin):
         return
 
     sl  = smart_stop(df, sig)
-    tp  = smart_tp(price, sl, sig)
+    tp  = smart_tp(df, price, sl, sig)
     lev = calc_safe_leverage(price, sl)
     qty = position_size(symbol, price, sl, risk_usd)
 
@@ -336,12 +360,28 @@ def process_coin(coin):
             )
             return  # ters yönde hiçbir şey yapma
         else:
-            # AYNI YÖN → pozisyonu büyüt (yeni işlem aç)
+            # AYNI YÖN → limit kontrolü
+            if state.get("add_count", 0) >= MAX_ADDS:
+                print(f"EKLEME LİMİTİ DOLDU ({MAX_ADDS}) — işlem açılmadı")
+                send_telegram(
+                    f"⚠️ <b>{name} EKLEME LİMİTİ DOLDU</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Açık pozisyon: <b>{pos['side']}</b>\n"
+                    f"Gelen sinyal: <b>{sig}</b> (aynı yön)\n"
+                    f"Mevcut ekleme sayısı: {state.get('add_count',0)}/{MAX_ADDS}\n\n"
+                    f"İşlem AÇILMADI (limit doldu).\n"
+                    f"👁 İstersen manuel kontrol et."
+                )
+                return
+
+            # AYNI YÖN ve limit altında → pozisyonu büyüt
             print("AYNI YÖN — pozisyon büyütülüyor")
             open_position(symbol, sig, qty, sl, tp)
+            state["add_count"] = state.get("add_count", 0) + 1
             emoji = "🟢" if sig == "LONG" else "🔴"
             send_telegram(
-                f"{emoji} <b>{name} EKLEME: {sig}</b>\n"
+                f"{emoji} <b>{name} EKLEME: {sig}</b> "
+                f"({state['add_count']}/{MAX_ADDS})\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"Mevcut {pos['side']} pozisyonuna eklendi.\n"
                 f"💰 Giriş: ${round(price,2)}\n"
@@ -352,11 +392,12 @@ def process_coin(coin):
                 f"📦 Miktar: {qty}"
             )
     else:
-        # POZİSYON YOK → yeni aç
+        # POZİSYON YOK → yeni aç, sayaç sıfırla/başlat
         open_position(symbol, sig, qty, sl, tp)
+        state["add_count"] = 1
         emoji = "🟢" if sig == "LONG" else "🔴"
         send_telegram(
-            f"{emoji} <b>{name} İşlem Açıldı: {sig}</b>\n"
+            f"{emoji} <b>{name} İşlem Açıldı: {sig}</b> (1/{MAX_ADDS})\n"
             f"💰 Giriş: ${round(price,2)}\n"
             f"🛑 SL: ${round(sl,2)}\n"
             f"🎯 TP: ${round(tp,2)}\n"
