@@ -20,8 +20,8 @@ MAX_LEVERAGE = 50
 RR          = 1.8
 LIQ_SAFETY  = 1.5
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID   = os.getenv("CHAT_ID")
 
 # =========================
 # TELEGRAM
