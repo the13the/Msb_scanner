@@ -53,6 +53,12 @@ exchange = ccxt.okx({
     "options": {"defaultType": "swap"}
 })
 
+# Markets yükle — kontrat boyutu (contractSize) için gerekli
+try:
+    exchange.load_markets()
+except Exception as e:
+    print("Market yükleme hatası:", e)
+
 # =========================
 # STATE
 # =========================
@@ -181,12 +187,33 @@ def estimate_liq_price(entry, side, leverage):
     move = entry / leverage
     return (entry - move) if side == "LONG" else (entry + move)
 
-def position_size(entry, sl, risk_usd):
+def position_size(symbol, entry, sl, risk_usd):
+    """
+    Risk sabit. SL mesafesine göre coin miktarı, sonra OKX kontrat
+    birimine çevrilir ve borsanın hassasiyetine yuvarlanır.
+    """
     dist = abs(entry - sl)
     if dist <= 0:
         return 0
-    qty = risk_usd / dist
-    return round(max(qty, 0.001), 6)
+
+    # SL'ye değince tam risk_usd kaybedilecek coin miktarı
+    coin_amount = risk_usd / dist
+
+    try:
+        market = exchange.market(symbol)
+        contract_size = market.get("contractSize") or 1
+        # coin miktarını kontrat sayısına çevir
+        contracts = coin_amount / contract_size
+        # Borsanın izin verdiği hassasiyete yuvarla
+        contracts = float(exchange.amount_to_precision(symbol, contracts))
+        # minimum kontrol
+        min_amt = (market.get("limits", {}).get("amount", {}) or {}).get("min") or 0
+        if min_amt and contracts < min_amt:
+            contracts = min_amt
+        return contracts
+    except Exception as e:
+        print("position_size hata:", e)
+        return round(max(coin_amount, 0.001), 6)
 
 # =========================
 # OPEN POSITION
@@ -248,19 +275,25 @@ def process_coin(coin):
     sl  = smart_stop(df, sig)
     tp  = smart_tp(price, sl, sig)
     lev = calc_safe_leverage(price, sl)
-    qty = position_size(price, sl, risk_usd)
+    qty = position_size(symbol, price, sl, risk_usd)
 
-    margin_needed = (qty * price) / lev
+    # qty artık kontrat sayısı; gerçek pozisyon değeri = qty * contractSize * price
+    try:
+        cs = exchange.market(symbol).get("contractSize") or 1
+    except:
+        cs = 1
+    position_value = qty * cs * price
+    margin_needed = position_value / lev
     balance = get_balance()
 
     # C: marjin yetmezse kaldıraç yükselt
     adjusted = False
     if margin_needed > balance and balance > 0:
-        needed_lev = (qty * price) / balance
+        needed_lev = position_value / balance
         new_lev = min(int(needed_lev) + 1, MAX_LEVERAGE)
         if new_lev > lev:
             lev = new_lev
-            margin_needed = (qty * price) / lev
+            margin_needed = position_value / lev
             adjusted = True
 
     try:
