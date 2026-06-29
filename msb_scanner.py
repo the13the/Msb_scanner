@@ -11,8 +11,8 @@ import requests
 # =========================
 
 COINS = [
-    {"symbol": "BTC/USDT:USDT", "risk": 20, "state": "state_btc.json"},
-    {"symbol": "ETH/USDT:USDT", "risk": 10, "state": "state_eth.json"},
+    {"symbol": "BTC/USDT:USDT", "risk": 10, "state": "state_btc.json"},
+    {"symbol": "ETH/USDT:USDT", "risk": 5, "state": "state_eth.json"},
 ]
 
 TIMEFRAME   = "1h"
@@ -63,7 +63,7 @@ except Exception as e:
 # STATE
 # =========================
 
-MAX_ADDS = 3  # aynı pozisyona en fazla kaç kez eklenebilir
+MAX_ADDS = 1  # aynı pozisyona en fazla kaç kez eklenebilir
 
 def load_state(path):
     default = {"last_long_ts": None, "last_short_ts": None, "add_count": 0}
